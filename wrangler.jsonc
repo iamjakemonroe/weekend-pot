@@ -1,0 +1,22 @@
+// Weekend Pot: the app (dist), its API (worker/index.ts), its own database (D1)
+// and a check every 10 minutes for the games of pots that have started.
+// Secrets (wrangler secret put): UTOPIA_DB_URL, SETUP_KEY. Deploy: npm run deploy.
+{
+  "name": "weekend-pot",
+  "main": "worker/index.ts",
+  "compatibility_date": "2025-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/in/*"]
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "weekend-pot", "database_id": "local-only-until-created", "migrations_dir": "migrations" }
+  ],
+  "triggers": { "crons": ["*/10 * * * *"] },
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": true }
+}
