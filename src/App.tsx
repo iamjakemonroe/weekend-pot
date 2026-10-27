@@ -421,7 +421,6 @@ function PotCard({ pot, s, refresh, index }: { pot: Pot; s: State; refresh: () =
   const [open, setOpen] = useState(pot.phase === 'joining' || pot.phase === 'playing' || pot.phase === 'decided');
   // A folded pot's insides are only built once it's first opened (and kept, to fold away smoothly).
   const [built, setBuilt] = useState(open);
-  const [note, setNote] = useState('');
   const [manual, setManual] = useState<number[]>([]);
   const [why, setWhy] = useState('');
   const admin = s.me.is_admin;
@@ -441,7 +440,7 @@ function PotCard({ pot, s, refresh, index }: { pot: Pot; s: State; refresh: () =
   const phaseBadge =
     pot.phase === 'joining' ? (
       <Badge tone="gold">
-        <LuClock /> Joining · closes {f.when(pot.starts_at)}
+        <LuClock /> Starts {f.when(pot.starts_at)}
       </Badge>
     ) : pot.phase === 'playing' ? (
       <Badge tone="cyan">
@@ -527,45 +526,29 @@ function PotCard({ pot, s, refresh, index }: { pot: Pot; s: State; refresh: () =
               </div>
             )}
 
-            {/* Your part */}
-            {pot.phase === 'joining' && !mine && (
-              <Busy className="btn-gold h-12 w-full text-[15px]" onClick={() => act('join')} done="You’re in the pot">
-                Join for {f.money(pot.stake)}
-              </Busy>
-            )}
-            {pot.phase === 'joining' && mine && mine.state !== 'paid' && (
-              <div className="rounded-2xl bg-black/25 p-4 ring-1 ring-white/[0.05]">
-                <p className="text-[14px] font-semibold">
-                  {mine.state === 'sent' ? 'Waiting for the holder to confirm your payment' : `Send ${f.money(pot.stake)} to the holder`}
+            {/* Where you stand. Friends only look: the holder puts in each player who has paid. */}
+            {pot.status === 'open' &&
+              (mine?.state === 'paid' ? (
+                <p className="rounded-2xl bg-win/[0.08] p-4 text-[14px] leading-6 text-win ring-1 ring-win/15">
+                  <b>You’re in.</b> Play {pot.game === 'any' ? 'Ludo, Crazy Eights, Chess or Checkers' : GAME_LABEL[pot.game]} in Utopia with exactly
+                  the players below, between {f.when(pot.starts_at)} and {f.when(pot.ends_at)}.
                 </p>
-                {s.settings.treasurer && <p className="mt-2 whitespace-pre-line text-[13.5px] leading-6 text-muted">{s.settings.treasurer}</p>}
-                <p className="mt-1.5 text-[12.5px] text-faint">
-                  Reference: <span className="font-mono text-muted">POT-{pot.id} {s.me.name}</span>
-                </p>
-                {mine.state === 'joined' && (
-                  <div className="mt-3 flex gap-2">
-                    <input className="field h-10" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note (optional), e.g. sent from OPay" />
-                    <Busy className="btn-gold shrink-0" onClick={() => act('sent', { note })} done="Told the holder">
-                      I’ve sent it
-                    </Busy>
-                  </div>
-                )}
-                <Busy className="btn-ghost -ml-3 mt-1 h-8 text-[13px]" onClick={() => act('leave')}>
-                  Leave this pot
-                </Busy>
-              </div>
-            )}
-            {pot.status === 'open' && mine?.state === 'paid' && (
-              <p className="rounded-2xl bg-win/[0.08] p-4 text-[14px] leading-6 text-win ring-1 ring-win/15">
-                <b>You’re in.</b> Play {pot.game === 'any' ? 'Ludo, Crazy Eights, Chess or Checkers' : GAME_LABEL[pot.game]} in Utopia with exactly the
-                paid players below, between {f.when(pot.starts_at)} and {f.when(pot.ends_at)}.
-              </p>
-            )}
+              ) : pot.phase === 'joining' && !admin ? (
+                <div className="rounded-2xl bg-black/25 p-4 ring-1 ring-white/[0.05]">
+                  <p className="text-[14px] font-semibold">To play, send {f.money(pot.stake)} to the holder</p>
+                  {s.settings.treasurer && <p className="mt-2 whitespace-pre-line text-[13.5px] leading-6 text-muted">{s.settings.treasurer}</p>}
+                  <p className="mt-1.5 text-[12.5px] text-faint">
+                    Reference: <span className="font-mono text-muted">POT-{pot.id} {s.me.name}</span>. The holder puts you in once it arrives.
+                  </p>
+                </div>
+              ) : !admin ? (
+                <p className="rounded-2xl bg-white/[0.03] p-4 text-[14px] text-muted ring-1 ring-white/[0.05]">You’re not playing in this one.</p>
+              ) : null)}
 
             {/* Players */}
             <h3 className="label mb-2 mt-5">Players</h3>
             {pot.entries.length === 0 ? (
-              <p className="text-[14px] text-muted">Nobody has joined yet.</p>
+              <p className="text-[14px] text-muted">{admin ? 'Nobody’s in yet. Put players in below once they’ve paid you.' : 'Nobody’s in yet.'}</p>
             ) : (
               <ul className="space-y-2">
                 {pot.entries.map((e) => (
@@ -573,13 +556,16 @@ function PotCard({ pot, s, refresh, index }: { pot: Pot; s: State; refresh: () =
                 ))}
               </ul>
             )}
+            {admin && pot.status === 'open' && (
+              <AddPlayers pot={pot} members={s.members} act={act} />
+            )}
 
             {/* Games found */}
             {pot.phase !== 'joining' && pot.status !== 'cancelled' && (
               <>
                 <div className="mb-2 mt-5 flex items-center justify-between">
                   <h3 className="label mb-0">Games in Utopia</h3>
-                  {pot.status === 'open' && (
+                  {admin && pot.status === 'open' && (
                     <Busy className="btn-ghost h-7 px-2 text-[12px]" onClick={() => act('check')}>
                       <LuRefreshCw /> Check now
                     </Busy>
@@ -701,14 +687,16 @@ function PlayerRow({
           )}
         </div>
       </div>
-      {admin && pot.status === 'open' && e.state !== 'paid' && (
-        <Busy className="btn-gold h-8 px-3 text-[12.5px]" onClick={() => act('confirm', { member_id: e.member_id, paid: true })}>
-          Confirm paid
-        </Busy>
-      )}
-      {admin && pot.status === 'open' && e.state === 'paid' && (
-        <Busy className="btn-ghost h-8 px-2 text-[12px]" onClick={() => act('confirm', { member_id: e.member_id, paid: false })}>
-          Undo
+      {admin && pot.status === 'open' && (
+        <Busy
+          className="btn-ghost h-8 px-2 text-[12px] text-danger"
+          onClick={async () => {
+            if (await ask(`Take ${name} out of this pot?`, { detail: 'If they paid you, send their stake back yourself.', yes: 'Take out', danger: true })) {
+              await act('remove', { member_id: e.member_id });
+            }
+          }}
+        >
+          Remove
         </Busy>
       )}
       {admin && pot.status !== 'open' && e.payout > 0 && (
@@ -720,6 +708,25 @@ function PlayerRow({
         </Busy>
       )}
     </li>
+  );
+}
+
+/** For the holder: the group members not in the pot yet, to put in once they've paid. */
+function AddPlayers({ pot, members, act }: { pot: Pot; members: Member[]; act: (action: string, body?: Record<string, unknown>) => Promise<void> }) {
+  const out = members.filter((m) => !pot.entries.some((e) => e.member_id === m.id && e.state === 'paid'));
+  if (!out.length) return null;
+  return (
+    <div className="mt-4 rounded-2xl bg-gold/[0.05] p-4 ring-1 ring-gold/15">
+      <p className="text-[13px] font-semibold text-gold">Paid you? Put them in</p>
+      <div className="mt-2.5 flex flex-wrap gap-2">
+        {out.map((m) => (
+          <Busy key={m.id} className="btn-line h-9 px-3 text-[13px]" onClick={() => act('add', { member_id: m.id })} done={`${m.name} is in`}>
+            <LuPlus /> {m.name}
+          </Busy>
+        ))}
+      </div>
+      {pot.phase === 'playing' && <p className="mt-2.5 text-[12px] leading-5 text-faint">Games have started: only games between exactly the players in count.</p>}
+    </div>
   );
 }
 

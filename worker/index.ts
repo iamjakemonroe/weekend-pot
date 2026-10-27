@@ -311,8 +311,10 @@ async function api(req: Request, env: Env, ctx: ExecutionContext, url: URL): Pro
     const me = await whoIs(req, env);
     if (!me) throw new HttpError(401, 'Open your personal link to sign in.');
     const admin = () => {
-      if (!me.is_admin) throw new HttpError(403, 'Only the pot holder can do that.');
+      if (!me.is_admin) throw new HttpError(403, 'Only the holder can change things.');
     };
+    // Friends only look: everything that changes something is the holder's.
+    if (method === 'POST') admin();
 
     if (path === '/api/state' && method === 'GET') return json(await state(env, me));
 
@@ -339,40 +341,12 @@ async function api(req: Request, env: Env, ctx: ExecutionContext, url: URL): Pro
       return json({ id: row!.id });
     }
 
-    const potRoute = path.match(/^\/api\/pots\/(\d+)\/(join|leave|sent|confirm|check|decide|cancel|payout)$/);
+    const potRoute = path.match(/^\/api\/pots\/(\d+)\/(add|remove|check|decide|cancel|payout)$/);
     if (potRoute && method === 'POST') {
       const pot = await getPot(env, Number(potRoute[1]));
       const action = potRoute[2];
       const started = Date.now() >= Date.parse(pot.starts_at);
-      const mine = await env.DB.prepare('select * from entries where pot_id = ? and member_id = ?').bind(pot.id, me.id).first<EntryRow>();
 
-      if (action === 'join') {
-        if (pot.status !== 'open' || started) throw new HttpError(400, 'Joining has closed for this pot.');
-        if (!mine) {
-          await env.DB.prepare('insert into entries (pot_id, member_id) values (?, ?)').bind(pot.id, me.id).run();
-          await log(env, me.id, pot.id, 'joined');
-        }
-        return json({ ok: true });
-      }
-      if (action === 'leave') {
-        if (!mine) return json({ ok: true });
-        if (mine.state === 'paid') throw new HttpError(400, 'Your stake is confirmed: ask the holder to refund it.');
-        if (pot.status !== 'open' || started) throw new HttpError(400, 'This pot has started.');
-        await env.DB.prepare('delete from entries where pot_id = ? and member_id = ?').bind(pot.id, me.id).run();
-        await log(env, me.id, pot.id, 'left');
-        return json({ ok: true });
-      }
-      if (action === 'sent') {
-        if (!mine) throw new HttpError(400, 'Join the pot first.');
-        if (pot.status !== 'open' || started) throw new HttpError(400, 'Paying has closed for this pot.');
-        const b = await body<{ note?: string }>(req);
-        const note = text(b.note, 'the note', 120, false);
-        await env.DB.prepare("update entries set state = case when state = 'paid' then 'paid' else 'sent' end, sent_note = ?, sent_at = ? where pot_id = ? and member_id = ?")
-          .bind(note || null, nowIso(), pot.id, me.id)
-          .run();
-        await log(env, me.id, pot.id, 'sent', { note });
-        return json({ ok: true });
-      }
       if (action === 'check') {
         if (pot.status !== 'open') return json({ ok: true });
         if (pot.checked_at && Date.now() - Date.parse(pot.checked_at) < 15_000) return json({ ok: true, recent: true });
@@ -380,24 +354,25 @@ async function api(req: Request, env: Env, ctx: ExecutionContext, url: URL): Pro
         return json({ ok: true });
       }
 
-      admin();
-      if (action === 'confirm') {
-        const b = await body<{ member_id: number; paid: boolean }>(req);
+      // The holder puts in each player who has paid them (and can take one out while the pot is open).
+      if (action === 'add' || action === 'remove') {
+        const b = await body<{ member_id: number }>(req);
         if (pot.status !== 'open') throw new HttpError(400, 'This pot is already decided.');
-        const entry = await env.DB.prepare('select * from entries where pot_id = ? and member_id = ?').bind(pot.id, b.member_id).first<EntryRow>();
-        if (!entry) throw new HttpError(400, 'They haven’t joined this pot.');
-        if (b.paid) {
-          await env.DB.prepare("update entries set state = 'paid', paid_at = ?, confirmed_by = ? where pot_id = ? and member_id = ?")
-            .bind(nowIso(), me.id, pot.id, b.member_id)
+        const member = await env.DB.prepare('select id, name from members where id = ? and removed_at is null')
+          .bind(Number(b.member_id))
+          .first<{ id: number; name: string }>();
+        if (!member) throw new HttpError(404, 'No such member.');
+        if (action === 'add') {
+          await env.DB.prepare(
+            `insert into entries (pot_id, member_id, state, paid_at, confirmed_by) values (?, ?, 'paid', ?, ?)
+             on conflict (pot_id, member_id) do update set state = 'paid', paid_at = excluded.paid_at, confirmed_by = excluded.confirmed_by`,
+          )
+            .bind(pot.id, member.id, nowIso(), me.id)
             .run();
         } else {
-          await env.DB.prepare(
-            "update entries set state = case when sent_at is null then 'joined' else 'sent' end, paid_at = null, confirmed_by = null where pot_id = ? and member_id = ?",
-          )
-            .bind(pot.id, b.member_id)
-            .run();
+          await env.DB.prepare('delete from entries where pot_id = ? and member_id = ?').bind(pot.id, member.id).run();
         }
-        await log(env, me.id, pot.id, b.paid ? 'confirmed' : 'unconfirmed', { member: b.member_id });
+        await log(env, me.id, pot.id, action === 'add' ? 'added' : 'removed', { member: member.id });
         return json({ ok: true });
       }
       if (action === 'decide') {

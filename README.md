@@ -5,8 +5,8 @@ A private pot for a group of friends who play Utopia together. Everyone puts in 
 ## How a weekend works
 
 1. **The holder makes a pot.** For example: "Saturday Ludo, ₦5,000 each, games count from 7pm Saturday to 11pm Sunday, first game wins".
-2. **Everyone joins** from their personal link, sends their stake to the holder (the bank details are on the pot), and taps **I've sent it**.
-3. **The holder confirms** each payment. Only confirmed players are in the pot when the games start.
+2. **Everyone pays the holder.** Each friend opens their personal link: they see the pot, the holder's bank details and a payment reference.
+3. **The holder puts in each player who has paid** ("Paid you? Put them in" on the pot). Friends can only look. Every change is the holder's, and the server refuses anything else.
 4. **You play in Utopia**: a friends' room with exactly the confirmed players. Ludo, Crazy Eights, Chess and Checkers all count.
 5. **Every 10 minutes the app checks Utopia** for a finished game between exactly those players, and decides the pot:
    - **First game wins:** the first finished game decides it.
