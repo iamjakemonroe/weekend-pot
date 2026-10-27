@@ -29,25 +29,27 @@ const GAME_LABEL: Record<Game, string> = { any: 'Any game', ludo: 'Ludo', eights
 const RULE_LABEL: Record<Rule, string> = { first: 'First game wins', most: 'Most wins by the end' };
 const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+// Times are shown in each person's own time zone (the group spans countries). A message posted
+// to the group chat names its zone (whenZ), since everyone reading it is somewhere else.
 function useFormat(s: State['settings']) {
   return useMemo(() => {
     const money = new Intl.NumberFormat(undefined, { style: 'currency', currency: s.currency || 'NGN', currencyDisplay: 'narrowSymbol', maximumFractionDigits: 0 });
-    const when = new Intl.DateTimeFormat('en-GB', {
-      weekday: 'short',
-      day: 'numeric',
-      month: 'short',
-      hour: '2-digit',
-      minute: '2-digit',
-      timeZone: s.timezone || undefined,
-    });
-    const clock = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: s.timezone || undefined });
-    return { money: (n: number) => money.format(n), when: (iso: string) => when.format(new Date(iso)), clock: (iso: string) => clock.format(new Date(iso)) };
-  }, [s.currency, s.timezone]);
+    const day = { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' } as const;
+    const when = new Intl.DateTimeFormat('en-GB', day);
+    const whenZ = new Intl.DateTimeFormat('en-GB', { ...day, timeZoneName: 'short' });
+    const clock = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit' });
+    return {
+      money: (n: number) => money.format(n),
+      when: (iso: string) => when.format(new Date(iso)),
+      whenZ: (iso: string) => whenZ.format(new Date(iso)),
+      clock: (iso: string) => clock.format(new Date(iso)),
+    };
+  }, [s.currency]);
 }
 
-/** Good morning, afternoon or evening where the group is. No name: a phone may be passed around. */
-function greeting(timeZone?: string) {
-  const h = Number(new Intl.DateTimeFormat('en-GB', { hour: 'numeric', hourCycle: 'h23', timeZone }).format(new Date()));
+/** Good morning, afternoon or evening where you are. No name: a phone may be passed around. */
+function greeting() {
+  const h = new Date().getHours();
   return h >= 5 && h < 12 ? 'Good morning' : h >= 12 && h < 17 ? 'Good afternoon' : 'Good evening';
 }
 
@@ -612,11 +614,11 @@ function PotCard({ pot, s, refresh, index, focus, go }: { pot: Pot; s: State; re
       const p = holder?.payout;
       lines.push(`💰 ${pot.title}: ${f.money(pot.stake)} each, ${GAME_LABEL[pot.game]} (${RULE_LABEL[pot.rule].toLowerCase()})`);
       lines.push(
-        `Pay ${holderName} before ${f.when(pot.starts_at)}${p ? `: ${p.bank_name} ${p.account_number} (${p.account_name})` : ''}. Reference: POT-${pot.id} and your name.`,
+        `Pay ${holderName} before ${f.whenZ(pot.starts_at)}${p ? `: ${p.bank_name} ${p.account_number} (${p.account_name})` : ''}. Reference: POT-${pot.id} and your name.`,
       );
     } else {
       lines.push(`🎮 ${pot.title} is on: ${paid.map((e) => name(e.member_id)).join(', ')}. ${f.money(total)} to win.`);
-      lines.push(`Games count until ${f.when(pot.ends_at)}.`);
+      lines.push(`Games count until ${f.whenZ(pot.ends_at)}.`);
     }
     if (result) lines.push(owing ? `${holderName} is sending the money now.` : '✅ All paid out.');
     lines.push(location.origin);
@@ -1211,7 +1213,9 @@ function NewPot({ s, done, close }: { s: State; done: () => Promise<void>; close
             <input className="field text-[14px]" type="datetime-local" value={ends} onChange={(e) => setEnds(e.target.value)} />
           </label>
         </div>
-        <p className="text-[12.5px] leading-5 text-faint">Joining and paying close when the games start. Only games between exactly the paid players count.</p>
+        <p className="text-[12.5px] leading-5 text-faint">
+          In your time; everyone sees it in theirs. Joining and paying close when the games start. Only games between exactly the paid players count.
+        </p>
         <Busy
           className="btn-gold h-12 w-full text-[15px]"
           disabled={!title.trim() || !Number(stake)}
@@ -1343,7 +1347,7 @@ function Group({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
   const [username, setUsername] = useState('');
   const [link, setLink] = useState<{ name: string; link: string; mine?: boolean } | null>(null);
   const [bank, setBank] = useState<number | null>(null);
-  const [settings, setSettings] = useState({ group_name: s.settings.group_name, currency: s.settings.currency, timezone: s.settings.timezone, rotate: s.settings.rotate === '1' });
+  const [settings, setSettings] = useState({ group_name: s.settings.group_name, currency: s.settings.currency, rotate: s.settings.rotate === '1' });
   return (
     <div className="space-y-4">
       <div className="card rise p-5">
@@ -1471,18 +1475,14 @@ function Group({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
           <LuWallet className="text-gold" /> Settings
         </h2>
         <div className="mt-4 space-y-4">
-          <label className="block">
-            <span className="label">Group name</span>
-            <input className="field" value={settings.group_name} onChange={(e) => setSettings({ ...settings, group_name: e.target.value })} />
-          </label>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-[1fr_6.5rem] gap-3">
+            <label className="block">
+              <span className="label">Group name</span>
+              <input className="field" value={settings.group_name} onChange={(e) => setSettings({ ...settings, group_name: e.target.value })} />
+            </label>
             <label className="block">
               <span className="label">Currency</span>
               <input className="field" value={settings.currency} onChange={(e) => setSettings({ ...settings, currency: e.target.value })} maxLength={3} />
-            </label>
-            <label className="block">
-              <span className="label">Time zone</span>
-              <input className="field" value={settings.timezone} onChange={(e) => setSettings({ ...settings, timezone: e.target.value })} />
             </label>
           </div>
           <div>
@@ -1623,7 +1623,7 @@ export function App() {
         <div className="flex min-w-0 items-center gap-3">
           <Mark />
           <div className="min-w-0">
-            <p className="text-[12px] text-muted">{greeting(s.settings.timezone || undefined)}</p>
+            <p className="text-[12px] text-muted">{greeting()}</p>
             <h1 className="display truncate text-[22px] font-bold leading-tight">{s.settings.group_name}</h1>
           </div>
         </div>

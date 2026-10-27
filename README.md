@@ -10,7 +10,7 @@ A private pot for a group of friends who play Utopia together. Everyone puts in 
 
 ## How a weekend works
 
-1. **The organiser makes a pot** and picks its holder. For example: "Saturday Ludo, ₦5,000 each, games count from 7pm Saturday to 11pm Sunday, first game wins, Tobi holds the money". Taking turns, the next holder is suggested.
+1. **The organiser makes a pot** and picks its holder. For example: "Saturday Ludo, ₦5,000 each, games count from 7pm Saturday to 11pm Sunday, first game wins, Tobi holds the money". Taking turns, the next holder is suggested. Times show in each person's own time zone, for friends in different countries; a message posted to the group chat names its zone ("19:00 GMT+1").
 2. **Everyone pays the holder.** The pot shows the holder's bank, account number (one tap to copy) and a reference, `POT-1` plus your name. **Post to the group** opens WhatsApp with all of it written.
 3. **The holder puts in each player who has paid** ("Paid you? Put them in").
 4. **You play in Utopia**: a friends' room with exactly the confirmed players. Ludo, Crazy Eights, Chess and Checkers all count.

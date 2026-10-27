@@ -554,15 +554,6 @@ async function api(req: Request, env: Env, ctx: ExecutionContext, url: URL): Pro
         if (!/^[A-Z]{3}$/.test(c)) throw new HttpError(400, 'Use a 3-letter currency code, like NGN or USD.');
         values.push(['currency', c]);
       }
-      if (b.timezone !== undefined) {
-        const tz = String(b.timezone).trim();
-        try {
-          new Intl.DateTimeFormat('en', { timeZone: tz });
-        } catch {
-          throw new HttpError(400, 'That time zone isn’t right (like Africa/Lagos).');
-        }
-        values.push(['timezone', tz]);
-      }
       if (b.rotate !== undefined) values.push(['rotate', b.rotate ? '1' : '0']);
       await env.DB.batch(values.map(([k, v]) => env.DB.prepare('insert or replace into settings (key, value) values (?, ?)').bind(k, v)));
       await log(env, me.id, null, 'settings', Object.fromEntries(values));

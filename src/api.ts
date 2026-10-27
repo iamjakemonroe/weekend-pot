@@ -79,8 +79,8 @@ export interface LedgerRow {
 
 export interface State {
   me: { id: number; name: string; is_admin: boolean; utopia_username: string; payout: Payout | null };
-  /** rotate: '1' when the holder takes turns. */
-  settings: { group_name: string; currency: string; timezone: string; rotate?: string };
+  /** rotate: '1' when the holder takes turns. Times show in each person's own time zone. */
+  settings: { group_name: string; currency: string; rotate?: string };
   members: Member[];
   pots: Pot[];
   ledger: LedgerRow[];
