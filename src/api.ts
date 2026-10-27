@@ -46,14 +46,26 @@ export interface Pot {
   decision: Decision | null;
   checked_at: string | null;
   decided_at: string | null;
+  /** The member the stakes are paid to, who sends the payouts. */
+  holder_id: number;
   entries: Entry[];
+}
+
+/** Where a member's winnings go. Only sent to those allowed to see it (see state() in the Worker). */
+export interface Payout {
+  bank_name: string;
+  account_number: string;
+  account_name: string;
 }
 
 export interface Member {
   id: number;
   name: string;
   utopia_username: string;
+  /** An organiser: runs the group. */
   is_admin: number;
+  has_payout: boolean;
+  payout: Payout | null;
 }
 
 export interface LedgerRow {
@@ -66,8 +78,9 @@ export interface LedgerRow {
 }
 
 export interface State {
-  me: { id: number; name: string; is_admin: boolean; utopia_username: string };
-  settings: { group_name: string; currency: string; timezone: string; treasurer: string };
+  me: { id: number; name: string; is_admin: boolean; utopia_username: string; payout: Payout | null };
+  /** rotate: '1' when the holder takes turns. */
+  settings: { group_name: string; currency: string; timezone: string; rotate?: string };
   members: Member[];
   pots: Pot[];
   ledger: LedgerRow[];
@@ -89,11 +102,14 @@ export const api = {
   hello: () => call<{ setup: boolean; signed_in: boolean }>('/api/hello'),
   setup: (key: string, name: string, username: string) => call<{ link: string }>('/api/setup', { key, name, username }),
   state: () => call<State>('/api/state'),
-  newPot: (p: { title: string; game: Game; rule: Rule; stake: number; starts_at: string; ends_at: string }) => call<{ id: number }>('/api/pots', p),
+  newPot: (p: { title: string; game: Game; rule: Rule; stake: number; starts_at: string; ends_at: string; holder_id: number }) =>
+    call<{ id: number }>('/api/pots', p),
   pot: (id: number, action: string, body: Record<string, unknown> = {}) => call<{ ok: boolean }>(`/api/pots/${id}/${action}`, body),
   addMember: (name: string, username: string) => call<{ link: string }>('/api/members', { name, username }),
-  member: (id: number, action: 'link' | 'remove' | 'admin', body: Record<string, unknown> = {}) =>
+  member: (id: number, action: 'link' | 'remove' | 'admin' | 'payout', body: object = {}) =>
     call<{ link?: string; ok?: boolean }>(`/api/members/${id}/${action}`, body),
-  settings: (s: Partial<State['settings']>) => call<{ ok: boolean }>('/api/settings', s),
+  /** Your own bank details, or { clear: true }. */
+  myPayout: (p: Payout | { clear: true }) => call<{ ok: boolean }>('/api/me/payout', p),
+  settings: (s: Partial<Omit<State['settings'], 'rotate'>> & { rotate?: boolean }) => call<{ ok: boolean }>('/api/settings', s),
   signOut: () => call<{ ok: boolean }>('/api/signout', {}),
 };

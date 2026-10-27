@@ -1,6 +1,7 @@
 // Weekend Pot: a private pot for a group of friends who play Utopia together.
-// Members sign in with a personal link; the holder (an admin) confirms deposits and
-// sends payouts; the winner is read from Utopia's database (utopia.ts, decide.ts).
+// Members sign in with a personal link. The organisers (is_admin) run the group; each pot has a
+// holder, the member the stakes are paid to, who puts players in and sends the payouts to the bank
+// details each member saves. The winner is read from Utopia's database (utopia.ts, decide.ts).
 import { decide, split, type Outcome, type PotGame, type Rule } from './decide';
 import { utopia, type Utopia } from './utopia';
 
@@ -21,6 +22,12 @@ interface Member {
   is_admin: number;
 }
 
+interface Payout {
+  bank_name: string;
+  account_number: string;
+  account_name: string;
+}
+
 interface PotRow {
   id: number;
   title: string;
@@ -35,6 +42,7 @@ interface PotRow {
   decided_at: string | null;
   created_by: number;
   created_at: string;
+  holder_id: number;
 }
 
 interface EntryRow {
@@ -121,6 +129,30 @@ function text(v: unknown, field: string, max: number, required = true): string {
   return s;
 }
 
+/** Bank details as typed: spaces and dashes in the number are dropped. */
+function payoutDetails(b: Partial<Payout>, currency: string): Payout {
+  const bank = text(b.bank_name, 'the bank', 60);
+  const number = String(b.account_number ?? '').replace(/[\s-]/g, '').toUpperCase();
+  if (currency === 'NGN') {
+    if (!/^\d{10}$/.test(number)) throw new HttpError(400, 'A Nigerian account number has 10 digits.');
+  } else if (!/^[A-Z0-9]{6,34}$/.test(number)) {
+    throw new HttpError(400, 'Check the account number.');
+  }
+  return { bank_name: bank, account_number: number, account_name: text(b.account_name, 'the name on the account', 80) };
+}
+
+async function savePayout(env: Env, memberId: number, b: Partial<Payout> & { clear?: boolean }) {
+  if (b.clear) {
+    await env.DB.prepare('update members set bank_name = null, account_number = null, account_name = null where id = ?').bind(memberId).run();
+    return;
+  }
+  const currency = (await env.DB.prepare("select value from settings where key = 'currency'").first<{ value: string }>())?.value ?? 'NGN';
+  const p = payoutDetails(b, currency);
+  await env.DB.prepare('update members set bank_name = ?, account_number = ?, account_name = ? where id = ?')
+    .bind(p.bank_name, p.account_number, p.account_name, memberId)
+    .run();
+}
+
 function phase(p: PotRow, now = Date.now()): string {
   if (p.status !== 'open') return p.status;
   return now < Date.parse(p.starts_at) ? 'joining' : 'playing';
@@ -192,10 +224,21 @@ async function applyOutcome(env: Env, pot: PotRow, outcome: Outcome, now: Date, 
     ...Object.entries(outcome.payouts).map(([memberId, amount]) =>
       env.DB.prepare("update entries set payout = ? where pot_id = ? and member_id = ? and state = 'paid'").bind(amount, pot.id, Number(memberId)),
     ),
+    keptByHolder(env, pot, at),
   ];
   await env.DB.batch(stmts);
+  await settleIfDone(env, pot.id);
   await log(env, by, pot.id, 'decided', { winners: outcome.winners, refund: outcome.refund, reason: outcome.reason });
 }
+
+/** The holder's own share is already in their account: nothing to send. */
+const keptByHolder = (env: Env, pot: PotRow, at: string) =>
+  env.DB.prepare('update entries set paid_out_at = ?, paid_out_by = ? where pot_id = ? and member_id = ? and payout > 0').bind(
+    at,
+    pot.holder_id,
+    pot.id,
+    pot.holder_id,
+  );
 
 async function cancelPot(env: Env, pot: PotRow, by: number | null, reason: string) {
   const at = nowIso();
@@ -207,6 +250,7 @@ async function cancelPot(env: Env, pot: PotRow, by: number | null, reason: strin
     ),
     // Everyone who paid gets their stake back.
     env.DB.prepare("update entries set payout = case when state = 'paid' then ? else 0 end where pot_id = ?").bind(pot.stake, pot.id),
+    keptByHolder(env, pot, at),
   ]);
   await log(env, by, pot.id, 'cancelled', { reason });
 }
@@ -225,9 +269,9 @@ async function settleIfDone(env: Env, potId: number) {
 async function state(env: Env, me: Member) {
   const { results: settingRows } = await env.DB.prepare('select key, value from settings').all<{ key: string; value: string }>();
   const settings = Object.fromEntries(settingRows.map((r) => [r.key, r.value]));
-  const { results: members } = await env.DB.prepare(
-    'select id, name, utopia_username, is_admin from members where removed_at is null order by id',
-  ).all();
+  const { results: rows } = await env.DB.prepare(
+    'select id, name, utopia_username, is_admin, bank_name, account_number, account_name from members where removed_at is null order by id',
+  ).all<Omit<Member, 'utopia_id'> & { [K in keyof Payout]: string | null }>();
   const { results: pots } = await env.DB.prepare(
     `select * from pots order by case status when 'open' then 0 when 'decided' then 1 else 2 end, starts_at desc limit 40`,
   ).all<PotRow>();
@@ -250,9 +294,27 @@ async function state(env: Env, me: Member) {
        from entries e join pots p on p.id = e.pot_id
       group by e.member_id`,
   ).all();
+  // Bank details are private. You see your own; organisers see everyone's; everyone sees the
+  // holder's for an open pot (to pay in); a holder sees the players' in their pots (to pay out).
+  const visible = new Set([me.id]);
+  for (const p of pots) {
+    if (p.status === 'open') visible.add(p.holder_id);
+    if (p.holder_id === me.id) for (const e of entries) if (e.pot_id === p.id) visible.add(e.member_id);
+  }
+  const members = rows.map(({ bank_name, account_number, account_name, ...m }) => ({
+    ...m,
+    has_payout: !!account_number,
+    payout: account_number && (me.is_admin || visible.has(m.id)) ? { bank_name, account_number, account_name } : null,
+  }));
   const now = Date.now();
   return {
-    me: { id: me.id, name: me.name, is_admin: !!me.is_admin, utopia_username: me.utopia_username },
+    me: {
+      id: me.id,
+      name: me.name,
+      is_admin: !!me.is_admin,
+      utopia_username: me.utopia_username,
+      payout: members.find((m) => m.id === me.id)?.payout ?? null,
+    },
     settings,
     members,
     ledger,
@@ -311,16 +373,25 @@ async function api(req: Request, env: Env, ctx: ExecutionContext, url: URL): Pro
     const me = await whoIs(req, env);
     if (!me) throw new HttpError(401, 'Open your personal link to sign in.');
     const admin = () => {
-      if (!me.is_admin) throw new HttpError(403, 'Only the holder can change things.');
+      if (!me.is_admin) throw new HttpError(403, 'Only the organiser can change that.');
     };
-    // Friends only look: everything that changes something is the holder's.
-    if (method === 'POST') admin();
+    // Friends mostly look. They may save their own bank details, and in a pot whose money they
+    // hold, put in the players who paid them and mark the payouts they've sent (checked below).
+    // Everything else that changes something is the organisers'.
+    const theirs = path === '/api/me/payout' || /^\/api\/pots\/\d+\/(add|remove|check|payout)$/.test(path);
+    if (method === 'POST' && !theirs) admin();
 
     if (path === '/api/state' && method === 'GET') return json(await state(env, me));
 
+    if (path === '/api/me/payout' && method === 'POST') {
+      await savePayout(env, me.id, await body(req));
+      await log(env, me.id, null, 'payout_details', { member: me.id });
+      return json({ ok: true });
+    }
+
     if (path === '/api/pots' && method === 'POST') {
       admin();
-      const b = await body<{ title: string; game: PotGame; rule: Rule; stake: number; starts_at: string; ends_at: string }>(req);
+      const b = await body<{ title: string; game: PotGame; rule: Rule; stake: number; starts_at: string; ends_at: string; holder_id?: number }>(req);
       const title = text(b.title, 'a title', 60);
       if (!GAMES.includes(b.game)) throw new HttpError(400, 'Choose a game.');
       if (!RULES.includes(b.rule)) throw new HttpError(400, 'Choose how it’s won.');
@@ -332,12 +403,16 @@ async function api(req: Request, env: Env, ctx: ExecutionContext, url: URL): Pro
       if (starts < Date.now() - 10 * 60_000) throw new HttpError(400, 'The start should be in the future.');
       if (ends <= starts) throw new HttpError(400, 'It should end after it starts.');
       if (ends - starts > 7 * 86_400_000) throw new HttpError(400, 'A pot can run for 7 days at most.');
-      const row = await env.DB.prepare(
-        'insert into pots (title, game, rule, stake, starts_at, ends_at, created_by, created_at) values (?, ?, ?, ?, ?, ?, ?, ?) returning id',
-      )
-        .bind(title, b.game, b.rule, stake, new Date(starts).toISOString(), new Date(ends).toISOString(), me.id, nowIso())
+      const holder = await env.DB.prepare('select id from members where id = ? and removed_at is null')
+        .bind(b.holder_id === undefined ? me.id : Number(b.holder_id))
         .first<{ id: number }>();
-      await log(env, me.id, row!.id, 'created', { title, stake });
+      if (!holder) throw new HttpError(400, 'Choose who holds the money.');
+      const row = await env.DB.prepare(
+        'insert into pots (title, game, rule, stake, starts_at, ends_at, created_by, created_at, holder_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?) returning id',
+      )
+        .bind(title, b.game, b.rule, stake, new Date(starts).toISOString(), new Date(ends).toISOString(), me.id, nowIso(), holder.id)
+        .first<{ id: number }>();
+      await log(env, me.id, row!.id, 'created', { title, stake, holder: holder.id });
       return json({ id: row!.id });
     }
 
@@ -346,6 +421,8 @@ async function api(req: Request, env: Env, ctx: ExecutionContext, url: URL): Pro
       const pot = await getPot(env, Number(potRoute[1]));
       const action = potRoute[2];
       const started = Date.now() >= Date.parse(pot.starts_at);
+      // A holder runs their own pot; `decide` and `cancel` never get here unless you're an organiser.
+      if (!me.is_admin && pot.holder_id !== me.id) throw new HttpError(403, 'Only this pot’s holder or the organiser can do that.');
 
       if (action === 'check') {
         if (pot.status !== 'open') return json({ ok: true });
@@ -429,7 +506,7 @@ async function api(req: Request, env: Env, ctx: ExecutionContext, url: URL): Pro
       return json({ link: `${url.origin}/in/${token}` });
     }
 
-    const memberRoute = path.match(/^\/api\/members\/(\d+)\/(link|remove|admin)$/);
+    const memberRoute = path.match(/^\/api\/members\/(\d+)\/(link|remove|admin|payout)$/);
     if (memberRoute && method === 'POST') {
       admin();
       const id = Number(memberRoute[1]);
@@ -442,8 +519,21 @@ async function api(req: Request, env: Env, ctx: ExecutionContext, url: URL): Pro
         // Your own new link: the old one stops working everywhere, but this phone stays signed in.
         return json({ link: `${url.origin}/in/${token}` }, 200, id === me.id ? { 'set-cookie': sessionCookie(token) } : {});
       }
-      if (id === me.id) throw new HttpError(400, 'Ask another holder to do that for you.');
+      // For a friend who'd rather tell you their bank details than type them in.
+      if (memberRoute[2] === 'payout') {
+        await savePayout(env, id, await body(req));
+        await log(env, me.id, null, 'payout_details', { member: id });
+        return json({ ok: true });
+      }
+      if (id === me.id) throw new HttpError(400, 'Ask another organiser to do that for you.');
       if (memberRoute[2] === 'remove') {
+        const holding = await env.DB.prepare(
+          `select title from pots p where holder_id = ? and (status = 'open'
+             or exists (select 1 from entries e where e.pot_id = p.id and e.payout > 0 and e.paid_out_at is null)) limit 1`,
+        )
+          .bind(id)
+          .first<{ title: string }>();
+        if (holding) throw new HttpError(400, `${target.name} holds the money for ${holding.title}. Pay that pot out first.`);
         await env.DB.prepare('update members set removed_at = ?, token_hash = null where id = ?').bind(nowIso(), id).run();
         await log(env, me.id, null, 'member_removed', { member: id });
         return json({ ok: true });
@@ -456,7 +546,7 @@ async function api(req: Request, env: Env, ctx: ExecutionContext, url: URL): Pro
 
     if (path === '/api/settings' && method === 'POST') {
       admin();
-      const b = await body<Record<string, string>>(req);
+      const b = await body<Record<string, string> & { rotate?: boolean }>(req);
       const values: [string, string][] = [];
       if (b.group_name !== undefined) values.push(['group_name', text(b.group_name, 'a group name', 40)]);
       if (b.currency !== undefined) {
@@ -473,7 +563,7 @@ async function api(req: Request, env: Env, ctx: ExecutionContext, url: URL): Pro
         }
         values.push(['timezone', tz]);
       }
-      if (b.treasurer !== undefined) values.push(['treasurer', text(b.treasurer, 'the payment details', 300, false)]);
+      if (b.rotate !== undefined) values.push(['rotate', b.rotate ? '1' : '0']);
       await env.DB.batch(values.map(([k, v]) => env.DB.prepare('insert or replace into settings (key, value) values (?, ?)').bind(k, v)));
       await log(env, me.id, null, 'settings', Object.fromEntries(values));
       return json({ ok: true });

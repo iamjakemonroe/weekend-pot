@@ -1,21 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
 import {
+  LuArrowRight,
   LuCheck,
   LuCircleAlert,
+  LuCircleCheck,
   LuClock,
   LuCoins,
   LuCopy,
   LuGamepad2,
+  LuLandmark,
   LuLoaderCircle,
+  LuMessageCircle,
   LuPlus,
   LuRefreshCw,
+  LuSend,
   LuShare2,
+  LuShieldCheck,
   LuSparkles,
   LuTrophy,
   LuUsers,
   LuWallet,
 } from 'react-icons/lu';
-import { api, type Entry, type Game, type Member, type Pot, type Rule, type State } from './api';
+import { api, type Entry, type Game, type Member, type Payout, type Pot, type Rule, type State } from './api';
 
 // ── Formatting ────────────────────────────────────────────────────────────
 
@@ -37,6 +43,12 @@ function useFormat(s: State['settings']) {
     const clock = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: s.timezone || undefined });
     return { money: (n: number) => money.format(n), when: (iso: string) => when.format(new Date(iso)), clock: (iso: string) => clock.format(new Date(iso)) };
   }, [s.currency, s.timezone]);
+}
+
+/** Good morning, afternoon or evening where the group is. No name: a phone may be passed around. */
+function greeting(timeZone?: string) {
+  const h = Number(new Intl.DateTimeFormat('en-GB', { hour: 'numeric', hourCycle: 'h23', timeZone }).format(new Date()));
+  return h >= 5 && h < 12 ? 'Good morning' : h >= 12 && h < 17 ? 'Good afternoon' : 'Good evening';
 }
 
 function ago(iso: string) {
@@ -136,6 +148,12 @@ async function share(text: string) {
     /* closed the share sheet */
   }
 }
+
+/** Opens WhatsApp with the message written, to pick the group chat. */
+const whatsapp = (text: string) => `https://wa.me/?text=${encodeURIComponent(text)}`;
+
+/** 0123456789 → 012 345 6789, easier to read out; copying gives the plain digits. */
+const spaced = (n: string) => (/^\d{10}$/.test(n) ? n.replace(/^(\d{3})(\d{3})(\d{4})$/, '$1 $2 $3') : n.replace(/(.{4})(?=.)/g, '$1 '));
 
 // ── Small pieces ──────────────────────────────────────────────────────────
 
@@ -255,6 +273,106 @@ function LinkBox({ link, name, mine = false }: { link: string; name: string; min
   );
 }
 
+/** A value you tap to copy, for pasting into a bank app. */
+function CopyChip({ text, what, children }: { text: string; what: string; children?: ReactNode }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef(0);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  return (
+    <button
+      type="button"
+      aria-label={`Copy ${what}`}
+      className="group inline-flex h-9 max-w-full items-center gap-2 rounded-xl bg-black/35 px-3 text-[14px] font-semibold tabular-nums ring-1 ring-white/10 transition-[box-shadow,transform] duration-150 hover:ring-gold/40 active:scale-[0.97]"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          buzz();
+          setCopied(true);
+          clearTimeout(timer.current);
+          timer.current = window.setTimeout(() => setCopied(false), 1600);
+          toast(`${what[0].toUpperCase()}${what.slice(1)} copied`);
+        } catch {
+          toast('Couldn’t copy: hold to select it instead', 'error');
+        }
+      }}
+    >
+      <span className="truncate">{children ?? text}</span>
+      {copied ? <LuCheck className="shrink-0 text-win" /> : <LuCopy className="shrink-0 text-faint transition-colors group-hover:text-gold" />}
+    </button>
+  );
+}
+
+/** Someone's bank details, with the account number ready to copy. */
+function BankCard({ p }: { p: Payout }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <CopyChip text={p.account_number} what="account number">
+        <span className="font-mono tracking-wide">{spaced(p.account_number)}</span>
+      </CopyChip>
+      <span className="min-w-0 text-[13px] leading-5 text-muted">
+        <span className="flex items-center gap-1.5 font-semibold text-ink">
+          <LuLandmark className="shrink-0 text-faint" /> {p.bank_name}
+        </span>
+        <span className="block truncate">{p.account_name}</span>
+      </span>
+    </div>
+  );
+}
+
+const NG_BANKS = [
+  'Access Bank', 'Ecobank', 'Fidelity Bank', 'First Bank', 'FCMB', 'GTBank', 'Jaiz Bank', 'Keystone Bank', 'Kuda', 'Moniepoint',
+  'OPay', 'PalmPay', 'Polaris Bank', 'Providus Bank', 'Stanbic IBTC', 'Sterling Bank', 'UBA', 'Union Bank', 'Unity Bank', 'Wema Bank (ALAT)', 'Zenith Bank',
+];
+
+/** Bank, account number and the name on the account: where someone's winnings go. */
+function PayoutForm({ initial, currency, save, cancel }: { initial: Payout | null; currency: string; save: (p: Payout) => Promise<void>; cancel?: () => void }) {
+  const [p, setP] = useState<Payout>(initial ?? { bank_name: '', account_number: '', account_name: '' });
+  const ng = currency === 'NGN';
+  const digits = p.account_number.replace(/[\s-]/g, '');
+  const ready = p.bank_name.trim() && p.account_name.trim() && (ng ? /^\d{10}$/.test(digits) : digits.length >= 6);
+  return (
+    <div className="space-y-3.5">
+      <label className="block">
+        <span className="label">Bank</span>
+        <input className="field" value={p.bank_name} onChange={(e) => setP({ ...p, bank_name: e.target.value })} list={ng ? 'ng-banks' : undefined} placeholder={ng ? 'GTBank, Opay, Kuda…' : 'Your bank'} autoComplete="off" />
+        {ng && (
+          <datalist id="ng-banks">
+            {NG_BANKS.map((b) => (
+              <option key={b} value={b} />
+            ))}
+          </datalist>
+        )}
+      </label>
+      <label className="block">
+        <span className="label">Account number</span>
+        <input
+          className="field font-mono tracking-wide"
+          value={p.account_number}
+          onChange={(e) => setP({ ...p, account_number: ng ? e.target.value.replace(/\D/g, '').slice(0, 10) : e.target.value })}
+          inputMode={ng ? 'numeric' : 'text'}
+          placeholder={ng ? '10 digits' : ''}
+          autoComplete="off"
+        />
+        {ng && digits.length > 0 && digits.length < 10 && <span className="mt-1 block text-[12px] text-faint">{10 - digits.length} more digits</span>}
+      </label>
+      <label className="block">
+        <span className="label">Name on the account</span>
+        <input className="field" value={p.account_name} onChange={(e) => setP({ ...p, account_name: e.target.value })} placeholder="As your bank shows it" autoComplete="off" />
+      </label>
+      <div className="flex gap-2 pt-1">
+        <Busy className="btn-gold" disabled={!ready} onClick={() => save({ ...p, account_number: digits })} done="Bank details saved">
+          <LuShieldCheck /> Save
+        </Busy>
+        {cancel && (
+          <button type="button" className="btn-ghost" onClick={cancel}>
+            Cancel
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const CONFETTI_COLORS = ['#f2c14e', '#38d6ff', '#2fd497', '#ffffff', '#ffd978'];
 function Confetti() {
   const bits = useMemo(
@@ -365,7 +483,7 @@ function Setup({ done }: { done: () => void }) {
       <div className="card card-live rise mt-[8vh] p-6">
         <Mark size={48} />
         <h1 className="display mt-5 text-[28px] font-bold leading-tight">Set up Weekend Pot</h1>
-        <p className="mt-2 text-[14px] leading-6 text-muted">You’re the first holder: you confirm deposits and send the winnings. Add your friends next.</p>
+        <p className="mt-2 text-[14px] leading-6 text-muted">You’re the organiser: you add your friends, start pots, and choose who holds each pot’s money.</p>
         {link ? (
           <>
             <LinkBox link={link} name={name} />
@@ -408,7 +526,7 @@ function SignedOut() {
         </span>
         <h1 className="display mt-5 text-[24px] font-bold">Weekend Pot is private</h1>
         <p className="mx-auto mt-2 max-w-xs text-[14px] leading-6 text-muted">
-          {old ? 'That link has been replaced. Ask the holder for your new one.' : 'Open the personal link the holder sent you to sign in.'}
+          {old ? 'That link has been replaced. Ask the organiser for your new one.' : 'Open the personal link the organiser sent you to sign in.'}
         </p>
       </div>
     </Shell>
@@ -417,27 +535,48 @@ function SignedOut() {
 
 // ── A pot ─────────────────────────────────────────────────────────────────
 
-function PotCard({ pot, s, refresh, index }: { pot: Pot; s: State; refresh: () => Promise<void>; index: number }) {
+/** A pot to scroll to and open (n changes on every ask, so asking twice works). */
+type Focus = { id: number; n: number } | null;
+
+function PotCard({ pot, s, refresh, index, focus, go }: { pot: Pot; s: State; refresh: () => Promise<void>; index: number; focus: Focus; go: (t: Tab) => void }) {
   const f = useFormat(s.settings);
-  // Open while there's something to do or see: joining, playing, and the result until it's paid out.
-  const [open, setOpen] = useState(pot.phase === 'joining' || pot.phase === 'playing' || pot.phase === 'decided');
+  const owing = pot.entries.some((e) => e.payout > 0 && !e.paid_out_at);
+  // Paid out in the last day: kept open so the winner sees it was sent.
+  const justPaid = pot.entries.some((e) => e.paid_out_at && Date.now() - Date.parse(e.paid_out_at) < 86_400_000);
+  // Open while there's something to do or see: joining, playing, and the result until a day after it's paid out.
+  const [open, setOpen] = useState(pot.phase === 'joining' || pot.phase === 'playing' || pot.phase === 'decided' || owing || justPaid);
   // A folded pot's insides are only built once it's first opened (and kept, to fold away smoothly).
   const [built, setBuilt] = useState(open);
   const [manual, setManual] = useState<number[]>([]);
   const [why, setWhy] = useState('');
-  const admin = s.me.is_admin;
-  const name = (id: number | null | undefined) => s.members.find((m) => m.id === id)?.name ?? 'Someone';
+  const ref = useRef<HTMLElement>(null);
+  const organiser = s.me.is_admin;
+  const holding = pot.holder_id === s.me.id;
+  // The holder runs their pot (who's in, and the payouts); an organiser can step in.
+  const runs = organiser || holding;
+  const member = (id: number | null | undefined) => s.members.find((m) => m.id === id);
+  const name = (id: number | null | undefined) => member(id)?.name ?? 'Someone';
+  const holder = member(pot.holder_id);
+  const holderName = holder?.name ?? 'the holder';
   const mine = pot.entries.find((e) => e.member_id === s.me.id);
   const paid = pot.entries.filter((e) => e.state === 'paid');
   const total = pot.stake * paid.length;
   const d = pot.decision;
   const won = d?.kind === 'decided' && !d.refund;
+  const result = d?.kind === 'decided' || d?.kind === 'cancelled';
   const confetti = useFirstView(`wp.won.${pot.id}`, won && pot.phase === 'decided');
   const live = pot.phase === 'joining' || pot.phase === 'playing';
   const act = async (action: string, body: Record<string, unknown> = {}) => {
     await api.pot(pot.id, action, body);
     await refresh();
   };
+
+  useEffect(() => {
+    if (focus?.id !== pot.id) return;
+    setBuilt(true);
+    setOpen(true);
+    ref.current?.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' });
+  }, [focus, pot.id]);
 
   const phaseBadge =
     pot.phase === 'joining' ? (
@@ -458,16 +597,38 @@ function PotCard({ pot, s, refresh, index }: { pot: Pot; s: State; refresh: () =
       <Badge tone="danger">Cancelled</Badge>
     );
 
+  const winners = (d?.winners ?? []).map(name).join(' & ');
+  const playLine = `Play ${pot.game === 'any' ? 'Ludo, Crazy Eights, Chess or Checkers' : GAME_LABEL[pot.game]} in Utopia with exactly the players below, between ${f.when(pot.starts_at)} and ${f.when(pot.ends_at)}.`;
+
+  /** For the group chat: how to join, how it's going, or the result. */
   const shareText = () => {
-    const lines = [`💰 ${pot.title}: ${f.money(pot.stake)} each, ${GAME_LABEL[pot.game]} (${RULE_LABEL[pot.rule].toLowerCase()})`];
-    if (pot.phase === 'joining') lines.push(`Join and pay before ${f.when(pot.starts_at)}: ${location.origin}`);
-    if (pot.phase === 'playing') lines.push(`${paid.length} players in, ${f.money(total)} pot. Games count until ${f.when(pot.ends_at)}.`);
-    if (d?.kind === 'decided') lines.push(d.refund ? `Result: everyone gets their stake back. ${d.reason ?? ''}` : `🏆 ${(d.winners ?? []).map(name).join(' & ')}: ${f.money(total)}. ${d.reason ?? ''}`);
+    const lines: string[] = [];
+    if (d?.kind === 'cancelled') lines.push(`↩️ ${pot.title} was cancelled: everyone gets their ${f.money(pot.stake)} back.`);
+    else if (d?.kind === 'decided' && d.refund) lines.push(`↩️ ${pot.title}: no winner. ${d.reason ?? ''}`.trim());
+    else if (d?.kind === 'decided') {
+      lines.push(`🏆 ${pot.title}: ${winners} ${(d.winners ?? []).length > 1 ? 'share' : 'wins'} ${f.money(total)}`);
+      lines.push(`${paid.length} players × ${f.money(pot.stake)}, ${GAME_LABEL[pot.game]}. ${d.reason ?? ''}`.trim());
+    } else if (pot.phase === 'joining') {
+      const p = holder?.payout;
+      lines.push(`💰 ${pot.title}: ${f.money(pot.stake)} each, ${GAME_LABEL[pot.game]} (${RULE_LABEL[pot.rule].toLowerCase()})`);
+      lines.push(
+        `Pay ${holderName} before ${f.when(pot.starts_at)}${p ? `: ${p.bank_name} ${p.account_number} (${p.account_name})` : ''}. Reference: POT-${pot.id} and your name.`,
+      );
+    } else {
+      lines.push(`🎮 ${pot.title} is on: ${paid.map((e) => name(e.member_id)).join(', ')}. ${f.money(total)} to win.`);
+      lines.push(`Games count until ${f.when(pot.ends_at)}.`);
+    }
+    if (result) lines.push(owing ? `${holderName} is sending the money now.` : '✅ All paid out.');
+    lines.push(location.origin);
     return lines.join('\n');
   };
 
   return (
-    <article className={`rise overflow-hidden ${live || pot.phase === 'decided' ? 'card card-live' : 'card'}`} style={{ '--d': `${Math.min(index, 6) * 70}ms` } as CSSProperties}>
+    <article
+      ref={ref}
+      className={`rise scroll-mt-36 overflow-hidden ${live || pot.phase === 'decided' ? 'card card-live' : 'card'}`}
+      style={{ '--d': `${Math.min(index, 6) * 70}ms` } as CSSProperties}
+    >
       <button
         type="button"
         aria-expanded={open}
@@ -489,7 +650,12 @@ function PotCard({ pot, s, refresh, index }: { pot: Pot; s: State; refresh: () =
             {phaseBadge}
             {d?.kind === 'decided' && (
               <Badge tone="gold">
-                <LuTrophy /> {d.refund ? 'Stakes back' : (d.winners ?? []).map(name).join(' & ')}
+                <LuTrophy /> {d.refund ? 'Stakes back' : winners}
+              </Badge>
+            )}
+            {(live || owing) && (
+              <Badge tone="muted">
+                <LuWallet /> {holding ? 'Money with you' : `Money with ${holderName}`}
               </Badge>
             )}
           </span>
@@ -504,70 +670,139 @@ function PotCard({ pot, s, refresh, index }: { pot: Pot; s: State; refresh: () =
         <div>
           {built && (
           <div className="border-t border-white/[0.06] px-5 pb-5 pt-4">
-            {d && (d.kind === 'decided' || d.kind === 'cancelled') && (
+            {result && d && (
               <div className="relative mb-4 overflow-visible rounded-2xl bg-gradient-to-br from-gold/[0.12] to-transparent p-4 ring-1 ring-gold/15">
                 {confetti && <Confetti />}
-                {d.kind === 'decided' && !d.refund ? (
+                {won ? (
                   <p className="display flex items-center gap-2 text-[19px] font-bold">
                     <LuTrophy className="shrink-0 text-gold" />
                     <span className="shine">
-                      {(d.winners ?? []).map(name).join(' & ')} {(d.winners ?? []).length > 1 ? 'share' : 'wins'} {f.money(total)}
+                      {winners} {(d.winners ?? []).length > 1 ? 'share' : 'wins'} {f.money(total)}
                     </span>
                   </p>
                 ) : (
                   <p className="display text-[17px] font-bold">Everyone gets their stake back</p>
                 )}
                 {d.reason && <p className="mt-1 text-[13.5px] text-muted">{d.reason}</p>}
+                {/* Straight to the group chat: WhatsApp opens with the message written. */}
+                <div className="mt-3.5 flex flex-wrap gap-2">
+                  <a className={`${runs ? 'btn-gold' : 'btn-line'} h-9`} href={whatsapp(shareText())} target="_blank" rel="noopener noreferrer">
+                    <LuMessageCircle /> Post the result
+                  </a>
+                  <button type="button" className="btn-line h-9" onClick={() => void share(shareText())}>
+                    <LuShare2 /> Share
+                  </button>
+                </div>
               </div>
             )}
 
             {d?.kind === 'needs_admin' && (
               <div className="mb-4 rounded-2xl border border-warn/30 bg-warn/[0.07] p-4 text-[14px]">
-                <p className="font-semibold text-warn">The holder needs to decide this one</p>
+                <p className="font-semibold text-warn">The organiser needs to decide this one</p>
                 <p className="mt-1 text-muted">{d.reason}</p>
               </div>
             )}
 
-            {/* Where you stand. Friends only look: the holder puts in each player who has paid. */}
-            {pot.status === 'open' &&
-              (mine?.state === 'paid' ? (
-                <p className="rounded-2xl bg-win/[0.08] p-4 text-[14px] leading-6 text-win ring-1 ring-win/15">
-                  <b>You’re in.</b> Play {pot.game === 'any' ? 'Ludo, Crazy Eights, Chess or Checkers' : GAME_LABEL[pot.game]} in Utopia with exactly
-                  the players below, between {f.when(pot.starts_at)} and {f.when(pot.ends_at)}.
+            {/* The payouts: the holder copies each account number, pays, and marks it sent. */}
+            {runs && result && <PayOuts pot={pot} s={s} act={act} money={f.money} />}
+
+            {/* Your winnings (or stake) on its way, for a player who isn't running the pot. */}
+            {!runs && mine && mine.payout > 0 && (
+              mine.paid_out_at ? (
+                <p className="fade mb-4 flex items-start gap-2 rounded-2xl bg-win/[0.08] p-4 text-[14px] leading-6 text-win ring-1 ring-win/15">
+                  <LuCircleCheck className="mt-1 shrink-0" />
+                  <span>
+                    {holderName} sent you {f.money(mine.payout)} {ago(mine.paid_out_at)}. Check your bank.
+                  </span>
                 </p>
-              ) : pot.phase === 'joining' && !admin ? (
-                <div className="rounded-2xl bg-black/25 p-4 ring-1 ring-white/[0.05]">
-                  <p className="text-[14px] font-semibold">To play, send {f.money(pot.stake)} to the holder</p>
-                  {s.settings.treasurer && <p className="mt-2 whitespace-pre-line text-[13.5px] leading-6 text-muted">{s.settings.treasurer}</p>}
-                  <p className="mt-1.5 text-[12.5px] text-faint">
-                    Reference: <span className="font-mono text-muted">POT-{pot.id} {s.me.name}</span>. The holder puts you in once it arrives.
+              ) : (
+                <div className="mb-4 rounded-2xl bg-gold/[0.06] p-4 text-[14px] leading-6 ring-1 ring-gold/15">
+                  <p className="font-semibold">
+                    {holderName} is sending you {f.money(mine.payout)}
                   </p>
+                  {s.me.payout ? (
+                    <p className="text-muted">
+                      To {s.me.payout.bank_name} {spaced(s.me.payout.account_number)}. It shows here as sent once it’s on its way.
+                    </p>
+                  ) : (
+                    <>
+                      <p className="text-muted">Add your bank details so they know where to send it.</p>
+                      <button type="button" className="btn-gold mt-3 h-9" onClick={() => go('you')}>
+                        <LuLandmark /> Add bank details
+                      </button>
+                    </>
+                  )}
                 </div>
-              ) : !admin ? (
+              )
+            )}
+
+            {/* Where you stand while it's open. Only the holder (or an organiser) puts players in. */}
+            {pot.status === 'open' &&
+              (holding ? (
+                <div className="rounded-2xl bg-gold/[0.06] p-4 text-[14px] leading-6 ring-1 ring-gold/15">
+                  <p className="flex items-center gap-2 font-semibold text-gold">
+                    <LuWallet className="shrink-0" /> You’re holding this pot’s money
+                  </p>
+                  <p className="mt-1 text-muted">
+                    {pot.phase === 'joining'
+                      ? `Friends send ${f.money(pot.stake)} to your account. When it arrives, put them in below${mine?.state === 'paid' ? '.' : ', and put yourself in to play.'}`
+                      : 'When the app finds the winner, you’ll pay them from here in a few taps.'}
+                  </p>
+                  {mine?.state === 'paid' && <p className="mt-2 text-win">You’re in too. {playLine}</p>}
+                  {!s.me.payout && (
+                    <button type="button" className="btn-line mt-3 h-9" onClick={() => go('you')}>
+                      Add your bank details so they can pay you <LuArrowRight />
+                    </button>
+                  )}
+                </div>
+              ) : mine?.state === 'paid' ? (
+                <p className="rounded-2xl bg-win/[0.08] p-4 text-[14px] leading-6 text-win ring-1 ring-win/15">
+                  <b>You’re in.</b> {playLine}
+                </p>
+              ) : pot.phase === 'joining' ? (
+                <div className="rounded-2xl bg-black/25 p-4 ring-1 ring-white/[0.05]">
+                  <p className="text-[14px] font-semibold">
+                    To play, send {f.money(pot.stake)} to {holderName}
+                  </p>
+                  {holder?.payout ? (
+                    <div className="mt-3">
+                      <BankCard p={holder.payout} />
+                    </div>
+                  ) : (
+                    <p className="mt-1.5 text-[13.5px] text-muted">{holderName} hasn’t added their bank details yet. Ask them in the group.</p>
+                  )}
+                  <div className="mt-3 flex flex-wrap items-center gap-2 text-[12.5px] text-faint">
+                    Reference
+                    <CopyChip text={`POT-${pot.id}`} what="reference">
+                      <span className="font-mono text-[13px]">POT-{pot.id}</span>
+                    </CopyChip>
+                    and your name
+                  </div>
+                  <p className="mt-2 text-[12.5px] text-faint">{holderName} puts you in once it arrives.</p>
+                </div>
+              ) : (
                 <p className="rounded-2xl bg-white/[0.03] p-4 text-[14px] text-muted ring-1 ring-white/[0.05]">You’re not playing in this one.</p>
-              ) : null)}
+              ))}
 
             {/* Players */}
             <h3 className="label mb-2 mt-5">Players</h3>
             {pot.entries.length === 0 ? (
-              <p className="text-[14px] text-muted">{admin ? 'Nobody’s in yet. Put players in below once they’ve paid you.' : 'Nobody’s in yet.'}</p>
+              <p className="text-[14px] text-muted">{runs ? 'Nobody’s in yet. Put players in below once they’ve paid.' : 'Nobody’s in yet.'}</p>
             ) : (
               <ul className="space-y-2">
                 {pot.entries.map((e) => (
-                  <PlayerRow key={e.member_id} e={e} pot={pot} name={name(e.member_id)} admin={admin} money={f.money} act={act} />
+                  <PlayerRow key={e.member_id} e={e} pot={pot} name={name(e.member_id)} runs={runs} money={f.money} act={act} />
                 ))}
               </ul>
             )}
-            {admin && pot.status === 'open' && (
-              <AddPlayers pot={pot} members={s.members} act={act} />
-            )}
+            {runs && pot.status === 'open' && <AddPlayers pot={pot} members={s.members} holding={holding} holderName={holderName} act={act} />}
 
             {/* Games found */}
             {pot.phase !== 'joining' && pot.status !== 'cancelled' && (
               <>
                 <div className="mb-2 mt-5 flex items-center justify-between">
                   <h3 className="label mb-0">Games in Utopia</h3>
-                  {admin && pot.status === 'open' && (
+                  {runs && pot.status === 'open' && (
                     <Busy className="btn-ghost h-7 px-2 text-[12px]" onClick={() => act('check')}>
                       <LuRefreshCw /> Check now
                     </Busy>
@@ -594,8 +829,8 @@ function PotCard({ pot, s, refresh, index }: { pot: Pot; s: State; refresh: () =
               </>
             )}
 
-            {/* The holder deciding by hand */}
-            {admin && pot.status === 'open' && pot.phase === 'playing' && (
+            {/* The organiser deciding by hand */}
+            {organiser && pot.status === 'open' && pot.phase === 'playing' && (
               <details className="mt-5 rounded-2xl bg-white/[0.03] p-4 ring-1 ring-white/[0.05]" open={d?.kind === 'needs_admin'}>
                 <summary className="cursor-pointer text-[14px] font-semibold">Decide by hand</summary>
                 <p className="mt-2 text-[13px] text-muted">For a disputed game, or anything the app can’t see. Everyone sees your reason.</p>
@@ -619,24 +854,29 @@ function PotCard({ pot, s, refresh, index }: { pot: Pot; s: State; refresh: () =
               </details>
             )}
 
-            <div className="mt-5 flex flex-wrap gap-2">
-              <button type="button" className="btn-line h-9" onClick={() => void share(shareText())}>
-                <LuShare2 /> Share
-              </button>
-              {admin && pot.status === 'open' && (
-                <Busy
-                  className="btn-ghost h-9 text-danger"
-                  onClick={async () => {
-                    if (await ask('Cancel this pot?', { detail: 'Everyone who paid gets their stake back.', yes: 'Cancel pot', danger: true })) {
-                      await act('cancel', {});
-                      toast('Pot cancelled');
-                    }
-                  }}
-                >
-                  Cancel pot
-                </Busy>
-              )}
-            </div>
+            {!result && (
+              <div className="mt-5 flex flex-wrap gap-2">
+                <a className="btn-line h-9" href={whatsapp(shareText())} target="_blank" rel="noopener noreferrer">
+                  <LuMessageCircle /> Post to the group
+                </a>
+                <button type="button" className="btn-line h-9" onClick={() => void share(shareText())}>
+                  <LuShare2 /> Share
+                </button>
+                {organiser && pot.status === 'open' && (
+                  <Busy
+                    className="btn-ghost h-9 text-danger"
+                    onClick={async () => {
+                      if (await ask('Cancel this pot?', { detail: `Everyone who paid gets their stake back from ${holderName}.`, yes: 'Cancel pot', danger: true })) {
+                        await act('cancel', {});
+                        toast('Pot cancelled');
+                      }
+                    }}
+                  >
+                    Cancel pot
+                  </Busy>
+                )}
+              </div>
+            )}
           </div>
           )}
         </div>
@@ -645,18 +885,103 @@ function PotCard({ pot, s, refresh, index }: { pot: Pot; s: State; refresh: () =
   );
 }
 
+/** For whoever runs the pot: each payout with the account to send it to, then Mark sent. */
+function PayOuts({ pot, s, act, money }: { pot: Pot; s: State; act: (action: string, body?: Record<string, unknown>) => Promise<void>; money: (n: number) => string }) {
+  const payees = pot.entries.filter((e) => e.payout > 0);
+  if (!payees.length) return null;
+  const holding = pot.holder_id === s.me.id;
+  const holderName = s.members.find((m) => m.id === pot.holder_id)?.name ?? 'The holder';
+  const left = payees.filter((e) => !e.paid_out_at);
+  const refund = pot.status === 'cancelled' || pot.decision?.refund;
+  return (
+    <section aria-label="Payouts" className="mb-4 rounded-2xl bg-black/25 p-4 ring-1 ring-white/[0.06]">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="display flex items-center gap-2 text-[16px] font-bold">
+          {left.length ? <LuSend className="text-gold" /> : <LuCircleCheck className="text-win" />}
+          {!left.length ? 'All paid out' : holding ? (refund ? 'Send the stakes back' : 'Send the winnings') : `${holderName} is paying out`}
+        </h3>
+        {left.length > 0 && <span className="text-[12px] font-semibold text-faint">{left.length} to send</span>}
+      </div>
+      {left.length > 0 && <p className="mt-1 text-[13px] leading-5 text-muted">Copy the account number into your bank app, send the amount, then tap Mark sent.</p>}
+      <ul className="mt-3 space-y-2">
+        {payees.map((e) => {
+          const m = s.members.find((x) => x.id === e.member_id);
+          const who = m?.name ?? 'Someone';
+          if (e.member_id === pot.holder_id) {
+            return (
+              <li key={e.member_id} className="flex items-center gap-3 rounded-xl px-1 py-1 text-[13.5px] text-muted">
+                <Initial name={who} id={e.member_id} />
+                <span className="min-w-0 flex-1">
+                  {e.member_id === s.me.id ? `You keep ${money(e.payout)}: it’s already with you.` : `${who} keeps ${money(e.payout)}: it’s already with them.`}
+                </span>
+                <LuCircleCheck className="shrink-0 text-win" />
+              </li>
+            );
+          }
+          if (e.paid_out_at) {
+            return (
+              <li key={e.member_id} className="fade flex items-center gap-3 rounded-xl px-1 py-1 text-[13.5px]">
+                <Initial name={who} id={e.member_id} />
+                <span className="min-w-0 flex-1 text-muted">
+                  <b className="text-ink">{money(e.payout)}</b> sent to {who} · {ago(e.paid_out_at)}
+                </span>
+                <Busy className="btn-ghost h-8 px-2 text-[12px]" onClick={() => act('payout', { member_id: e.member_id, sent: false })}>
+                  Undo
+                </Busy>
+              </li>
+            );
+          }
+          return (
+            <li key={e.member_id} className="rise rounded-2xl bg-white/[0.035] p-3.5 ring-1 ring-gold/20">
+              <div className="flex items-center gap-3">
+                <Initial name={who} id={e.member_id} />
+                <div className="min-w-0 flex-1">
+                  <p className="text-[12px] text-faint">Send to</p>
+                  <p className="truncate font-semibold">{who}</p>
+                </div>
+                <CopyChip text={String(e.payout)} what="amount">
+                  <span className="display text-[17px] font-bold text-gold">{money(e.payout)}</span>
+                </CopyChip>
+              </div>
+              <div className="mt-3">
+                {m?.payout ? (
+                  <BankCard p={m.payout} />
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2 text-[13px] text-warn">
+                    <LuCircleAlert className="shrink-0" /> {who} hasn’t added bank details yet.
+                    <button
+                      type="button"
+                      className="btn-line h-8 px-3 text-[12.5px]"
+                      onClick={() => void share(`${who}, add your bank details in Weekend Pot (the You tab) so I can send your ${money(e.payout)}: ${location.origin}`)}
+                    >
+                      <LuMessageCircle /> Ask {who}
+                    </button>
+                  </div>
+                )}
+              </div>
+              <Busy className="btn-gold mt-3 h-10 w-full" onClick={() => act('payout', { member_id: e.member_id, sent: true })} done={`Marked sent to ${who}`}>
+                <LuCheck /> Mark sent
+              </Busy>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 function PlayerRow({
   e,
   pot,
   name,
-  admin,
+  runs,
   money,
   act,
 }: {
   e: Entry;
   pot: Pot;
   name: string;
-  admin: boolean;
+  runs: boolean;
   money: (n: number) => string;
   act: (action: string, body?: Record<string, unknown>) => Promise<void>;
 }) {
@@ -677,23 +1002,26 @@ function PlayerRow({
     <li className="flex items-center gap-3 rounded-2xl bg-white/[0.03] p-2.5 ring-1 ring-white/[0.04] transition-colors">
       <Initial name={name} id={e.member_id} />
       <div className="min-w-0 flex-1">
-        <p className="truncate text-[14.5px] font-semibold">{name}</p>
+        <p className="truncate text-[14.5px] font-semibold">
+          {name}
+          {e.member_id === pot.holder_id && <span className="ml-1.5 text-[12px] font-medium text-faint">holder</span>}
+        </p>
         <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
           {state}
           {e.sent_note && e.state !== 'paid' && <span className="truncate text-[12px] text-faint">“{e.sent_note}”</span>}
           {e.payout > 0 && (
             <Badge tone={e.paid_out_at ? 'muted' : 'gold'}>
               {e.payout > pot.stake ? 'Wins' : 'Gets'} {money(e.payout)}
-              {e.paid_out_at ? ' · sent' : ''}
+              {e.paid_out_at ? (e.member_id === pot.holder_id ? ' · kept' : ' · sent') : ''}
             </Badge>
           )}
         </div>
       </div>
-      {admin && pot.status === 'open' && (
+      {runs && pot.status === 'open' && (
         <Busy
           className="btn-ghost h-8 px-2 text-[12px] text-danger"
           onClick={async () => {
-            if (await ask(`Take ${name} out of this pot?`, { detail: 'If they paid you, send their stake back yourself.', yes: 'Take out', danger: true })) {
+            if (await ask(`Take ${name} out of this pot?`, { detail: 'If they paid in, send their stake back yourself.', yes: 'Take out', danger: true })) {
               await act('remove', { member_id: e.member_id });
             }
           }}
@@ -701,25 +1029,29 @@ function PlayerRow({
           Remove
         </Busy>
       )}
-      {admin && pot.status !== 'open' && e.payout > 0 && (
-        <Busy
-          className={e.paid_out_at ? 'btn-ghost h-8 px-2 text-[12px]' : 'btn-gold h-8 px-3 text-[12.5px]'}
-          onClick={() => act('payout', { member_id: e.member_id, sent: !e.paid_out_at })}
-        >
-          {e.paid_out_at ? 'Undo' : 'Mark sent'}
-        </Busy>
-      )}
     </li>
   );
 }
 
-/** For the holder: the group members not in the pot yet, to put in once they've paid. */
-function AddPlayers({ pot, members, act }: { pot: Pot; members: Member[]; act: (action: string, body?: Record<string, unknown>) => Promise<void> }) {
+/** For whoever runs the pot: the group members not in it yet, to put in once they've paid. */
+function AddPlayers({
+  pot,
+  members,
+  holding,
+  holderName,
+  act,
+}: {
+  pot: Pot;
+  members: Member[];
+  holding: boolean;
+  holderName: string;
+  act: (action: string, body?: Record<string, unknown>) => Promise<void>;
+}) {
   const out = members.filter((m) => !pot.entries.some((e) => e.member_id === m.id && e.state === 'paid'));
   if (!out.length) return null;
   return (
     <div className="mt-4 rounded-2xl bg-gold/[0.05] p-4 ring-1 ring-gold/15">
-      <p className="text-[13px] font-semibold text-gold">Paid you? Put them in</p>
+      <p className="text-[13px] font-semibold text-gold">{holding ? 'Paid you? Put them in' : `Paid ${holderName}? Put them in`}</p>
       <div className="mt-2.5 flex flex-wrap gap-2">
         {out.map((m) => (
           <Busy key={m.id} className="btn-line h-9 px-3 text-[13px]" onClick={() => act('add', { member_id: m.id })} done={`${m.name} is in`}>
@@ -728,6 +1060,50 @@ function AddPlayers({ pot, members, act }: { pot: Pot; members: Member[]; act: (
         ))}
       </div>
       {pot.phase === 'playing' && <p className="mt-2.5 text-[12px] leading-5 text-faint">Games have started: only games between exactly the players in count.</p>}
+    </div>
+  );
+}
+
+/** What's waiting on you: payouts to send for a pot you hold, and your bank details if they're missing. */
+function ToDo({ s, go, focus }: { s: State; go: (t: Tab) => void; focus: (id: number) => void }) {
+  const f = useFormat(s.settings);
+  const sends = s.pots
+    .filter((p) => p.holder_id === s.me.id)
+    .flatMap((p) => p.entries.filter((e) => e.payout > 0 && !e.paid_out_at && e.member_id !== p.holder_id).map((e) => ({ p, e })));
+  if (!sends.length && s.me.payout) return null;
+  const name = (id: number) => s.members.find((m) => m.id === id)?.name ?? 'someone';
+  const pots = [...new Set(sends.map((x) => x.p.title))];
+  return (
+    <div className="space-y-2.5">
+      {sends.length > 0 && (
+        <button type="button" onClick={() => focus(sends[0].p.id)} className="card card-live rise flex w-full items-center gap-3.5 p-4 text-left">
+          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-gold/15 text-[19px] text-gold ring-1 ring-gold/25">
+            <LuSend />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[11.5px] font-semibold uppercase tracking-[0.08em] text-gold">To send</span>
+            <span className="block truncate font-semibold">
+              {sends.length === 1
+                ? `${f.money(sends[0].e.payout)} to ${name(sends[0].e.member_id)}`
+                : `${sends.length} payouts, ${f.money(sends.reduce((n, x) => n + x.e.payout, 0))}`}
+            </span>
+            <span className="block truncate text-[12.5px] text-faint">{pots.join(', ')}</span>
+          </span>
+          <LuArrowRight className="shrink-0 text-muted" />
+        </button>
+      )}
+      {!s.me.payout && (
+        <button type="button" onClick={() => go('you')} className="card rise flex w-full items-center gap-3.5 p-4 text-left" style={{ '--d': '60ms' } as CSSProperties}>
+          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-cyan/10 text-[19px] text-cyan ring-1 ring-cyan/25">
+            <LuLandmark />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block font-semibold">Add your bank details</span>
+            <span className="block text-[12.5px] leading-5 text-muted">So whoever holds the pot can pay you the moment you win.</span>
+          </span>
+          <LuArrowRight className="shrink-0 text-muted" />
+        </button>
+      )}
     </div>
   );
 }
@@ -741,7 +1117,18 @@ function nextAt(dayOffset: number, hour: number) {
   return d;
 }
 
+/** Who holds the next pot: the same person as last time or, taking turns, the next member with bank details. */
+function suggestHolder(s: State): number {
+  const last = s.pots.reduce<Pot | null>((a, p) => (!a || p.id > a.id ? p : a), null)?.holder_id;
+  if (s.settings.rotate !== '1') return s.members.some((m) => m.id === last) ? last! : s.me.id;
+  const ready = s.members.filter((m) => m.has_payout);
+  const turn = ready.length ? ready : s.members;
+  return (turn.find((m) => last !== undefined && m.id > last) ?? turn[0]).id;
+}
+
 function NewPot({ s, done, close }: { s: State; done: () => Promise<void>; close: () => void }) {
+  const [holderId, setHolderId] = useState(() => suggestHolder(s));
+  const holder = s.members.find((m) => m.id === holderId);
   const [title, setTitle] = useState('Saturday Ludo');
   const [game, setGame] = useState<Game>('ludo');
   const [rule, setRule] = useState<Rule>('first');
@@ -797,6 +1184,23 @@ function NewPot({ s, done, close }: { s: State; done: () => Promise<void>; close
             ))}
           </div>
         </div>
+        <label className="block">
+          <span className="label">Who holds the money</span>
+          <select className="field" value={holderId} onChange={(e) => setHolderId(Number(e.target.value))}>
+            {s.members.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+                {m.id === s.me.id ? ' (you)' : ''}
+                {m.has_payout ? '' : ' · no bank details yet'}
+              </option>
+            ))}
+          </select>
+          <span className="mt-1.5 block text-[12.5px] leading-5 text-faint">
+            {holder && !holder.has_payout
+              ? `${holder.name} hasn’t saved bank details yet, so friends won’t see where to pay.`
+              : `Everyone pays ${holderId === s.me.id ? 'you' : holder?.name}; ${holderId === s.me.id ? 'you pay' : 'they pay'} the winner.${s.settings.rotate === '1' ? ' Taking turns: this is whose turn it is.' : ''}`}
+          </span>
+        </label>
         <div className="grid grid-cols-2 gap-3">
           <label className="block">
             <span className="label">Games count from</span>
@@ -813,7 +1217,7 @@ function NewPot({ s, done, close }: { s: State; done: () => Promise<void>; close
           disabled={!title.trim() || !Number(stake)}
           done="Pot created"
           onClick={async () => {
-            await api.newPot({ title, game, rule, stake: Number(stake), starts_at: new Date(starts).toISOString(), ends_at: new Date(ends).toISOString() });
+            await api.newPot({ title, game, rule, stake: Number(stake), starts_at: new Date(starts).toISOString(), ends_at: new Date(ends).toISOString(), holder_id: holderId });
             await done();
           }}
         >
@@ -824,7 +1228,7 @@ function NewPot({ s, done, close }: { s: State; done: () => Promise<void>; close
   );
 }
 
-// ── Table and holder tools ────────────────────────────────────────────────
+// ── Table, you, and the group ─────────────────────────────────────────────
 
 function Table({ s }: { s: State }) {
   const f = useFormat(s.settings);
@@ -867,11 +1271,79 @@ function Table({ s }: { s: State }) {
   );
 }
 
-function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
+/** Everyone's own page: where their winnings go, and signing out. */
+function You({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
+  const [editing, setEditing] = useState(false);
+  const saved = s.me.payout;
+  return (
+    <div className="space-y-4">
+      <div className={`card rise p-5 ${saved ? '' : 'card-live'}`}>
+        <h2 className="display flex items-center gap-2 text-[19px] font-bold">
+          <LuLandmark className="text-gold" /> Where your winnings go
+        </h2>
+        <p className="mt-1.5 text-[13.5px] leading-6 text-muted">Save it once. When you win, the holder sees it with a copy button and pays you in seconds.</p>
+        <div className="mt-4">
+          {saved && !editing ? (
+            <div className="fade">
+              <div className="rounded-2xl bg-black/25 p-4 ring-1 ring-white/[0.06]">
+                <BankCard p={saved} />
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button type="button" className="btn-line h-9" onClick={() => setEditing(true)}>
+                  Change
+                </button>
+                <Busy
+                  className="btn-ghost h-9 text-danger"
+                  onClick={async () => {
+                    if (!(await ask('Remove your bank details?', { detail: 'Holders won’t know where to send your winnings until you add them again.', yes: 'Remove', danger: true }))) return;
+                    await api.myPayout({ clear: true });
+                    await refresh();
+                  }}
+                >
+                  Remove
+                </Busy>
+              </div>
+            </div>
+          ) : (
+            <PayoutForm
+              initial={saved}
+              currency={s.settings.currency}
+              cancel={saved ? () => setEditing(false) : undefined}
+              save={async (p) => {
+                await api.myPayout(p);
+                await refresh();
+                setEditing(false);
+              }}
+            />
+          )}
+        </div>
+        <p className="mt-4 flex items-start gap-2 text-[12.5px] leading-5 text-faint">
+          <LuShieldCheck className="mt-0.5 shrink-0" />
+          Private: the organiser and the holder of a pot you play in see it, to pay you. While you hold a pot, its players see it too, to pay you in.
+        </p>
+      </div>
+
+      <Busy
+        className="btn-ghost"
+        onClick={async () => {
+          if (!(await ask('Sign out on this phone?', { detail: 'You’ll need your personal link to sign back in.', yes: 'Sign out' }))) return;
+          await api.signOut();
+          location.reload();
+        }}
+      >
+        Sign out on this phone
+      </Busy>
+    </div>
+  );
+}
+
+/** The organiser's page: the members, their links and bank details, and the group's settings. */
+function Group({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
   const [name, setName] = useState('');
   const [username, setUsername] = useState('');
   const [link, setLink] = useState<{ name: string; link: string; mine?: boolean } | null>(null);
-  const [settings, setSettings] = useState(s.settings);
+  const [bank, setBank] = useState<number | null>(null);
+  const [settings, setSettings] = useState({ group_name: s.settings.group_name, currency: s.settings.currency, timezone: s.settings.timezone, rotate: s.settings.rotate === '1' });
   return (
     <div className="space-y-4">
       <div className="card rise p-5">
@@ -880,50 +1352,90 @@ function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
         </h2>
         <ul className="mt-3 space-y-2">
           {s.members.map((m: Member) => (
-            <li key={m.id} className="flex items-center gap-3 rounded-2xl bg-white/[0.03] p-2.5 ring-1 ring-white/[0.04]">
-              <Initial name={m.name} id={m.id} />
-              <span className="min-w-0 flex-1">
-                <span className="flex items-center gap-1.5 truncate font-semibold">
-                  {m.name} {m.is_admin ? <Badge tone="gold">Holder</Badge> : null}
+            <li key={m.id} className="rounded-2xl bg-white/[0.03] p-3 ring-1 ring-white/[0.04]">
+              <div className="flex items-center gap-3">
+                <Initial name={m.name} id={m.id} />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-1.5 truncate font-semibold">
+                    {m.name} {m.is_admin ? <Badge tone="gold">Organiser</Badge> : null}
+                  </span>
+                  <span className="block truncate text-[12.5px] text-faint">
+                    @{m.utopia_username} ·{' '}
+                    {m.payout ? (
+                      `${m.payout.bank_name} ··${m.payout.account_number.slice(-4)}`
+                    ) : (
+                      <span className="text-warn">no bank details</span>
+                    )}
+                  </span>
                 </span>
-                <span className="block text-[12.5px] text-faint">@{m.utopia_username} in Utopia</span>
-              </span>
-              <Busy
-                className="btn-ghost h-8 px-2 text-[12.5px]"
-                onClick={async () => {
-                  const mine = m.id === s.me.id;
-                  if (mine && !(await ask('Make yourself a new link?', { detail: 'Your old link stops working for anyone who has it. This phone stays signed in.', yes: 'New link' }))) return;
-                  const r = await api.member(m.id, 'link');
-                  if (r.link) setLink({ name: m.name, link: r.link, mine });
-                }}
-              >
-                New link
-              </Busy>
-              {m.id !== s.me.id && (
+              </div>
+              <div className="-mx-1 mt-2 flex flex-wrap">
                 <Busy
                   className="btn-ghost h-8 px-2 text-[12.5px]"
                   onClick={async () => {
-                    const on = !m.is_admin;
-                    if (!(await ask(on ? `Make ${m.name} a holder?` : `Stop ${m.name} being a holder?`, { detail: 'Holders confirm deposits and send payouts.', yes: on ? 'Make holder' : 'Stop' }))) return;
-                    await api.member(m.id, 'admin', { on });
-                    await refresh();
+                    const mine = m.id === s.me.id;
+                    if (mine && !(await ask('Make yourself a new link?', { detail: 'Your old link stops working for anyone who has it. This phone stays signed in.', yes: 'New link' }))) return;
+                    const r = await api.member(m.id, 'link');
+                    if (r.link) setLink({ name: m.name, link: r.link, mine });
                   }}
                 >
-                  {m.is_admin ? 'Not holder' : 'Holder'}
+                  New link
                 </Busy>
-              )}
-              {m.id !== s.me.id && (
-                <Busy
-                  className="btn-ghost h-8 px-2 text-[12.5px] text-danger"
-                  onClick={async () => {
-                    if (!(await ask(`Remove ${m.name}?`, { detail: 'Their link stops working. Their history stays.', yes: 'Remove', danger: true }))) return;
-                    await api.member(m.id, 'remove');
-                    await refresh();
-                    toast(`${m.name} removed`);
-                  }}
+                <button
+                  type="button"
+                  className={`btn-ghost h-8 px-2 text-[12.5px] ${bank === m.id ? 'text-gold' : ''}`}
+                  aria-label="Bank details"
+                  aria-expanded={bank === m.id}
+                  onClick={() => setBank(bank === m.id ? null : m.id)}
                 >
-                  Remove
-                </Busy>
+                  <LuLandmark /> Bank
+                </button>
+                {m.id !== s.me.id && (
+                  <Busy
+                    className="btn-ghost h-8 px-2 text-[12.5px]"
+                    onClick={async () => {
+                      const on = !m.is_admin;
+                      if (
+                        !(await ask(on ? `Make ${m.name} an organiser?` : `Stop ${m.name} being an organiser?`, {
+                          detail: 'Organisers add and remove members, start and cancel pots, and decide disputed games.',
+                          yes: on ? 'Make organiser' : 'Stop',
+                        }))
+                      )
+                        return;
+                      await api.member(m.id, 'admin', { on });
+                      await refresh();
+                    }}
+                  >
+                    {m.is_admin ? 'Not organiser' : 'Organiser'}
+                  </Busy>
+                )}
+                {m.id !== s.me.id && (
+                  <Busy
+                    className="btn-ghost h-8 px-2 text-[12.5px] text-danger"
+                    onClick={async () => {
+                      if (!(await ask(`Remove ${m.name}?`, { detail: 'Their link stops working. Their history stays.', yes: 'Remove', danger: true }))) return;
+                      await api.member(m.id, 'remove');
+                      await refresh();
+                      toast(`${m.name} removed`);
+                    }}
+                  >
+                    Remove
+                  </Busy>
+                )}
+              </div>
+              {bank === m.id && (
+                <div className="rise mt-3 border-t border-white/[0.06] pt-4">
+                  <PayoutForm
+                    initial={m.payout}
+                    currency={s.settings.currency}
+                    cancel={() => setBank(null)}
+                    save={async (p) => {
+                      await api.member(m.id, 'payout', p);
+                      await refresh();
+                      setBank(null);
+                    }}
+                  />
+                </div>
               )}
             </li>
           ))}
@@ -973,15 +1485,24 @@ function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
               <input className="field" value={settings.timezone} onChange={(e) => setSettings({ ...settings, timezone: e.target.value })} />
             </label>
           </div>
-          <label className="block">
-            <span className="label">How to pay the holder (shown to everyone who joins)</span>
-            <textarea
-              className="field h-24 py-2.5"
-              value={settings.treasurer}
-              onChange={(e) => setSettings({ ...settings, treasurer: e.target.value })}
-              placeholder={'Bank: …\nAccount number: …\nName: …'}
-            />
-          </label>
+          <div>
+            <p className="label">Who holds the money</p>
+            <div className="grid grid-cols-2 gap-2">
+              {[false, true].map((rotate) => (
+                <button
+                  key={String(rotate)}
+                  type="button"
+                  onClick={() => setSettings({ ...settings, rotate })}
+                  aria-pressed={settings.rotate === rotate}
+                  className={`rounded-2xl border p-3 text-left text-[13px] transition-colors ${settings.rotate === rotate ? 'border-gold/70 bg-gold/10' : 'border-white/10 bg-black/20'}`}
+                >
+                  <b className="block text-[14px]">{rotate ? 'Take turns' : 'The same person'}</b>
+                  <span className="text-muted">{rotate ? 'Each new pot goes to the next member with bank details.' : 'Each new pot keeps the last pot’s holder.'}</span>
+                </button>
+              ))}
+            </div>
+            <p className="mt-1.5 text-[12px] text-faint">You can pick anyone when you start a pot.</p>
+          </div>
           <Busy
             className="btn-gold"
             done="Saved"
@@ -994,24 +1515,13 @@ function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
           </Busy>
         </div>
       </div>
-
-      <Busy
-        className="btn-ghost"
-        onClick={async () => {
-          if (!(await ask('Sign out on this phone?', { detail: 'You’ll need your personal link to sign back in.', yes: 'Sign out' }))) return;
-          await api.signOut();
-          location.reload();
-        }}
-      >
-        Sign out on this phone
-      </Busy>
     </div>
   );
 }
 
 // ── The app ───────────────────────────────────────────────────────────────
 
-type Tab = 'pots' | 'table' | 'holder';
+type Tab = 'pots' | 'table' | 'you' | 'group';
 
 function Tabs({ tabs, tab, setTab }: { tabs: [Tab, string][]; tab: Tab; setTab: (t: Tab) => void }) {
   const i = Math.max(0, tabs.findIndex(([id]) => id === tab));
@@ -1043,6 +1553,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('pots');
   const [creating, setCreating] = useState(false);
+  const [focus, setFocus] = useState<Focus>(null);
   const last = useRef('');
 
   // Only a change redraws the page: the 30-second refresh usually brings nothing new.
@@ -1103,7 +1614,8 @@ export function App() {
   const tabs: [Tab, string][] = [
     ['pots', 'Pots'],
     ['table', 'Table'],
-    ...(s.me.is_admin ? ([['holder', 'Holder']] as [Tab, string][]) : []),
+    ['you', 'You'],
+    ...(s.me.is_admin ? ([['group', 'Group']] as [Tab, string][]) : []),
   ];
   return (
     <Shell>
@@ -1111,7 +1623,7 @@ export function App() {
         <div className="flex min-w-0 items-center gap-3">
           <Mark />
           <div className="min-w-0">
-            <p className="text-[12px] text-muted">Hi {s.me.name}</p>
+            <p className="text-[12px] text-muted">{greeting(s.settings.timezone || undefined)}</p>
             <h1 className="display truncate text-[22px] font-bold leading-tight">{s.settings.group_name}</h1>
           </div>
         </div>
@@ -1123,6 +1635,7 @@ export function App() {
 
       {tab === 'pots' && (
         <div className="space-y-4">
+          <ToDo s={s} go={setTab} focus={(id) => setFocus({ id, n: Date.now() })} />
           {s.me.is_admin &&
             (creating ? (
               <NewPot
@@ -1144,15 +1657,16 @@ export function App() {
                 <Mark size={52} />
               </span>
               <p className="display mt-4 text-[18px] font-bold">No pots yet</p>
-              <p className="mt-1 text-[14px] text-muted">{s.me.is_admin ? 'Start one for this weekend.' : 'The holder will start one soon.'}</p>
+              <p className="mt-1 text-[14px] text-muted">{s.me.is_admin ? 'Start one for this weekend.' : 'The organiser will start one soon.'}</p>
             </div>
           ) : (
-            s.pots.map((p, i) => <PotCard key={p.id} pot={p} s={s} refresh={refresh} index={i} />)
+            s.pots.map((p, i) => <PotCard key={p.id} pot={p} s={s} refresh={refresh} index={i} focus={focus} go={setTab} />)
           )}
         </div>
       )}
       {tab === 'table' && <Table s={s} />}
-      {tab === 'holder' && s.me.is_admin && <Holder s={s} refresh={refresh} />}
+      {tab === 'you' && <You s={s} refresh={refresh} />}
+      {tab === 'group' && s.me.is_admin && <Group s={s} refresh={refresh} />}
     </Shell>
   );
 }

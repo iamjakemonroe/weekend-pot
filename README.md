@@ -2,19 +2,36 @@
 
 A private pot for a group of friends who play Utopia together. Everyone puts in a stake, you play, and the app reads the winner from Utopia's own game records, so nobody argues about who won.
 
+## Who does what
+
+- **The organiser** runs the group (the **Group** tab): adds friends and sends them their links, starts and cancels pots, and decides a disputed game by hand.
+- **The holder** of a pot is the friend the stakes are paid to. They put in each player who has paid them, and send the payouts. It can be the same person every week, or the group can take turns (**Group → Settings → Who holds the money**).
+- **Everyone else only looks.** The one thing a friend can change is their own bank details, in **You**. The server refuses everything else.
+
 ## How a weekend works
 
-1. **The holder makes a pot.** For example: "Saturday Ludo, ₦5,000 each, games count from 7pm Saturday to 11pm Sunday, first game wins".
-2. **Everyone pays the holder.** Each friend opens their personal link: they see the pot, the holder's bank details and a payment reference.
-3. **The holder puts in each player who has paid** ("Paid you? Put them in" on the pot). Friends can only look. Every change is the holder's, and the server refuses anything else.
+1. **The organiser makes a pot** and picks its holder. For example: "Saturday Ludo, ₦5,000 each, games count from 7pm Saturday to 11pm Sunday, first game wins, Tobi holds the money". Taking turns, the next holder is suggested.
+2. **Everyone pays the holder.** The pot shows the holder's bank, account number (one tap to copy) and a reference, `POT-1` plus your name. **Post to the group** opens WhatsApp with all of it written.
+3. **The holder puts in each player who has paid** ("Paid you? Put them in").
 4. **You play in Utopia**: a friends' room with exactly the confirmed players. Ludo, Crazy Eights, Chess and Checkers all count.
 5. **Every 10 minutes the app checks Utopia** for a finished game between exactly those players, and decides the pot:
    - **First game wins:** the first finished game decides it.
    - **Most wins:** play all weekend; at the end, the most wins takes the pot, and a tie shares it.
    - **No result:** a draw, or no game in time, gives everyone their stake back.
    - **Ignored:** abandoned games, and games with anyone else at the table.
-   - **Disputed:** a game disputed in Utopia goes to the holder to decide by hand, with a reason everyone sees.
-6. **The holder pays the winner** and taps **Mark sent**. The **Table** keeps everyone's running total.
+   - **Disputed:** a game disputed in Utopia goes to the organiser to decide by hand, with a reason everyone sees.
+6. **The holder pays out in about 30 seconds.** At the top of their page: "To send: ₦25,000 to Carol". The pot shows Carol's bank, account number and name. Copy the number and the amount into your bank app, send, then tap **Mark sent**. Carol sees "Tobi sent you ₦25,000". If the holder wins, they keep it: nothing to send.
+7. **Post the result** sends "🏆 Saturday Ludo: Carol wins ₦25,000" to the group chat. The **Table** keeps everyone's running total.
+
+## Bank details are private
+
+Each friend saves the account their winnings go to, once, under **You** (the organiser can fill it in for someone). Who can see them:
+
+- **you** and **the organiser**;
+- **the holder** of a pot you play in, to pay you;
+- while **you hold** an open pot, its players, to pay you in.
+
+Nobody else, and the app only stores them: it never moves money.
 
 ## Why the money goes through a holder, not a card payment
 
@@ -70,11 +87,11 @@ You need Node, the Cloudflare login you already use for Wavee (`npx wrangler who
    ```
 5. **Put it live:** `npm run deploy`. It prints the address, like `https://weekend-pot.<your-account>.workers.dev`. Keep it off kaivon.app.
 6. **Set up the group.**
-   1. Open the address, enter the setup key, your name and your Utopia username. You're the first holder.
-   2. In **Holder**, add each friend (name + Utopia username) and send each their personal link privately.
-   3. Add your bank details under **Settings**.
+   1. Open the address, enter the setup key, your name and your Utopia username. You're the organiser.
+   2. In **Group**, add each friend (name + Utopia username) and send each their own personal link, privately.
+   3. Add your bank details under **You**, and ask everyone to add theirs.
 
-Whoever opens a personal link is signed in as that person. If a link leaks, tap **New link**: the old one stops working.
+Whoever opens a personal link is signed in as that person, so give each friend their own. If a link leaks, tap **New link**: the old one stops working.
 
 ## Run it on this Mac
 
@@ -90,4 +107,4 @@ python3 test/utopia_db.py game ludo alice,bob,carol,dave,erin carol   # record a
 
 - `npm test`: the rules for deciding a pot (12 checks).
 - `python3 test/utopia_db.py check --pg-bin <dir>`: the read-only login against Utopia's real schema (14 checks).
-- The end-to-end run drives the app in Chrome, with five friends and a game recorded in Utopia (17 checks). It lives in the Claude scratchpad as `pot_e2e.mjs`.
+- The end-to-end run drives the app in Chrome: five friends, bank details, a friend holding the money, a game recorded in Utopia, the payout, and who can see and change what (41 checks). It lives in the Claude scratchpad as `pot_e2e.mjs`.
