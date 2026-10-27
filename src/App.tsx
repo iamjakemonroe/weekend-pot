@@ -227,11 +227,13 @@ function Busy({
   );
 }
 
-function LinkBox({ link, name }: { link: string; name: string }) {
+function LinkBox({ link, name, mine = false }: { link: string; name: string; mine?: boolean }) {
   return (
     <div className="rise mt-3 rounded-2xl border border-gold/25 bg-gold/[0.06] p-4">
       <p className="text-[13px] leading-5 text-muted">
-        {name}’s personal link. Send it to them privately: whoever opens it is signed in as {name}.
+        {mine
+          ? 'Your new personal link. The old one has stopped working; this phone stays signed in. Keep it to yourself.'
+          : `${name}’s personal link. Send it to them privately: whoever opens it is signed in as ${name}.`}
       </p>
       <p className="mt-2 break-all rounded-xl bg-black/30 px-3 py-2 font-mono text-[12.5px] text-ink">{link}</p>
       <div className="mt-3 flex gap-2">
@@ -868,7 +870,7 @@ function Table({ s }: { s: State }) {
 function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
   const [name, setName] = useState('');
   const [username, setUsername] = useState('');
-  const [link, setLink] = useState<{ name: string; link: string } | null>(null);
+  const [link, setLink] = useState<{ name: string; link: string; mine?: boolean } | null>(null);
   const [settings, setSettings] = useState(s.settings);
   return (
     <div className="space-y-4">
@@ -889,8 +891,10 @@ function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
               <Busy
                 className="btn-ghost h-8 px-2 text-[12.5px]"
                 onClick={async () => {
+                  const mine = m.id === s.me.id;
+                  if (mine && !(await ask('Make yourself a new link?', { detail: 'Your old link stops working for anyone who has it. This phone stays signed in.', yes: 'New link' }))) return;
                   const r = await api.member(m.id, 'link');
-                  if (r.link) setLink({ name: m.name, link: r.link });
+                  if (r.link) setLink({ name: m.name, link: r.link, mine });
                 }}
               >
                 New link
@@ -924,7 +928,7 @@ function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
             </li>
           ))}
         </ul>
-        {link && <LinkBox link={link.link} name={link.name} />}
+        {link && <LinkBox link={link.link} name={link.name} mine={link.mine} />}
         <div className="mt-5 grid grid-cols-2 gap-3">
           <label className="block">
             <span className="label">Name</span>

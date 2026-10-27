@@ -439,7 +439,8 @@ async function api(req: Request, env: Env, ctx: ExecutionContext, url: URL): Pro
         const token = newToken();
         await env.DB.prepare('update members set token_hash = ? where id = ?').bind(await sha256(token), id).run();
         await log(env, me.id, null, 'new_link', { member: id });
-        return json({ link: `${url.origin}/in/${token}` });
+        // Your own new link: the old one stops working everywhere, but this phone stays signed in.
+        return json({ link: `${url.origin}/in/${token}` }, 200, id === me.id ? { 'set-cookie': sessionCookie(token) } : {});
       }
       if (id === me.id) throw new HttpError(400, 'Ask another holder to do that for you.');
       if (memberRoute[2] === 'remove') {
