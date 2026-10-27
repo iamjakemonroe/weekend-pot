@@ -1,13 +1,16 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
 import {
   LuCheck,
+  LuCircleAlert,
   LuClock,
   LuCoins,
   LuCopy,
   LuGamepad2,
+  LuLoaderCircle,
   LuPlus,
   LuRefreshCw,
   LuShare2,
+  LuSparkles,
   LuTrophy,
   LuUsers,
   LuWallet,
@@ -18,6 +21,7 @@ import { api, type Entry, type Game, type Member, type Pot, type Rule, type Stat
 
 const GAME_LABEL: Record<Game, string> = { any: 'Any game', ludo: 'Ludo', eights: 'Crazy Eights', chess: 'Chess', checkers: 'Checkers' };
 const RULE_LABEL: Record<Rule, string> = { first: 'First game wins', most: 'Most wins by the end' };
+const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 function useFormat(s: State['settings']) {
   return useMemo(() => {
@@ -49,12 +53,84 @@ function localInput(d: Date) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+const buzz = () => navigator.vibrate?.(8);
+
+// ── Toasts and confirmations, instead of the browser's alert and confirm ──
+
+type Toast = { id: number; text: string; tone: 'ok' | 'error' };
+let toasts: Toast[] = [];
+const toastSubs = new Set<() => void>();
+function toast(text: string, tone: Toast['tone'] = 'ok') {
+  const id = Date.now() + Math.random();
+  toasts = [...toasts.slice(-2), { id, text, tone }];
+  toastSubs.forEach((f) => f());
+  setTimeout(() => {
+    toasts = toasts.filter((t) => t.id !== id);
+    toastSubs.forEach((f) => f());
+  }, tone === 'error' ? 4500 : 2600);
+}
+const subscribeToasts = (f: () => void) => (toastSubs.add(f), () => void toastSubs.delete(f));
+
+function Toasts() {
+  const list = useSyncExternalStore(subscribeToasts, () => toasts);
+  return (
+    <div className="pointer-events-none fixed inset-x-0 top-[max(0.75rem,env(safe-area-inset-top))] z-50 flex flex-col items-center gap-2 px-4">
+      {list.map((t) => (
+        <div
+          key={t.id}
+          role="status"
+          className={`toast-in flex max-w-sm items-center gap-2 rounded-2xl border px-4 py-2.5 text-[14px] font-medium shadow-2xl ${
+            t.tone === 'error' ? 'border-danger/30 bg-[#2a1114]/95 text-danger' : 'border-win/25 bg-[#0d2119]/95 text-win'
+          }`}
+        >
+          {t.tone === 'error' ? <LuCircleAlert className="shrink-0" /> : <LuCheck className="shrink-0" />}
+          {t.text}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+type Asking = { title: string; detail?: string; yes: string; danger?: boolean; done: (ok: boolean) => void } | null;
+let asking: Asking = null;
+const askSubs = new Set<() => void>();
+const setAsking = (a: Asking) => {
+  asking = a;
+  askSubs.forEach((f) => f());
+};
+function ask(title: string, opts: { detail?: string; yes?: string; danger?: boolean } = {}) {
+  return new Promise<boolean>((resolve) =>
+    setAsking({ title, detail: opts.detail, yes: opts.yes ?? 'Yes', danger: opts.danger, done: (ok) => (setAsking(null), resolve(ok)) }),
+  );
+}
+
+function AskSheet() {
+  const a = useSyncExternalStore((f) => (askSubs.add(f), () => void askSubs.delete(f)), () => asking);
+  if (!a) return null;
+  return (
+    <div className="fade fixed inset-0 z-40 flex items-end justify-center bg-black/60 p-4 sm:items-center" onClick={() => a.done(false)}>
+      <div className="card sheet-in w-full max-w-sm p-5" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={a.title}>
+        <p className="display text-[18px] font-bold">{a.title}</p>
+        {a.detail && <p className="mt-1.5 text-[14px] leading-6 text-muted">{a.detail}</p>}
+        <div className="mt-5 grid grid-cols-2 gap-2">
+          <button type="button" className="btn-line" onClick={() => a.done(false)}>
+            Not now
+          </button>
+          <button type="button" className={a.danger ? 'btn border border-danger/40 bg-danger/15 text-danger' : 'btn-gold'} onClick={() => a.done(true)}>
+            {a.yes}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 async function share(text: string) {
   try {
     if (navigator.share) await navigator.share({ text });
     else {
       await navigator.clipboard.writeText(text);
-      alert('Copied');
+      toast('Copied');
     }
   } catch {
     /* closed the share sheet */
@@ -63,43 +139,89 @@ async function share(text: string) {
 
 // ── Small pieces ──────────────────────────────────────────────────────────
 
-function Badge({ tone, children }: { tone: 'gold' | 'win' | 'warn' | 'muted' | 'danger'; children: ReactNode }) {
+/** Money that counts to its new value (from zero the first time it shows). */
+function Money({ value, format, className = '' }: { value: number; format: (n: number) => string; className?: string }) {
+  const [shown, setShown] = useState(() => (reducedMotion() ? value : 0));
+  const at = useRef(shown);
+  useEffect(() => {
+    const from = at.current;
+    if (from === value) return;
+    if (reducedMotion()) {
+      at.current = value;
+      setShown(value);
+      return;
+    }
+    const t0 = performance.now();
+    let raf = 0;
+    const step = (t: number) => {
+      const k = Math.min(1, (t - t0) / 750);
+      const n = Math.round(from + (value - from) * (1 - Math.pow(1 - k, 3)));
+      at.current = n;
+      setShown(n);
+      if (k < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [value]);
+  return <span className={`tabular-nums ${className}`}>{format(shown)}</span>;
+}
+
+function Badge({ tone, children }: { tone: 'gold' | 'win' | 'warn' | 'muted' | 'danger' | 'cyan'; children: ReactNode }) {
   const tones = {
-    gold: 'bg-gold/15 text-gold',
-    win: 'bg-win/15 text-win',
-    warn: 'bg-warn/15 text-warn',
-    muted: 'bg-white/[0.07] text-muted',
-    danger: 'bg-danger/15 text-danger',
+    gold: 'bg-gold/12 text-gold ring-1 ring-gold/20',
+    win: 'bg-win/12 text-win ring-1 ring-win/20',
+    warn: 'bg-warn/12 text-warn ring-1 ring-warn/20',
+    muted: 'bg-white/[0.06] text-muted ring-1 ring-white/[0.06]',
+    danger: 'bg-danger/12 text-danger ring-1 ring-danger/20',
+    cyan: 'bg-cyan/10 text-cyan ring-1 ring-cyan/25',
   };
   return <span className={`chip ${tones[tone]}`}>{children}</span>;
 }
 
-function Initial({ name }: { name: string }) {
+const HUES = ['from-[#f2c14e] to-[#e08a2c]', 'from-[#38d6ff] to-[#3b82f6]', 'from-[#2fd497] to-[#0ea371]', 'from-[#c084fc] to-[#7c3aed]', 'from-[#fb7185] to-[#e11d48]'];
+function Initial({ name, id = 0 }: { name: string; id?: number }) {
   return (
-    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-white/[0.08] text-[14px] font-semibold text-ink">
+    <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br ${HUES[id % HUES.length]} text-[14px] font-bold text-black/80 shadow-[0_4px_14px_-6px_rgba(0,0,0,0.6)]`}>
       {name.trim()[0]?.toUpperCase() ?? '?'}
     </span>
   );
 }
 
-function Busy({ onClick, children, className = 'btn-line', disabled }: { onClick: () => Promise<unknown>; children: ReactNode; className?: string; disabled?: boolean }) {
+function Busy({
+  onClick,
+  children,
+  className = 'btn-line',
+  disabled,
+  done,
+}: {
+  onClick: () => Promise<unknown>;
+  children: ReactNode;
+  className?: string;
+  disabled?: boolean;
+  /** Said in a toast once it worked. */
+  done?: string;
+}) {
   const [busy, setBusy] = useState(false);
   return (
     <button
       type="button"
       className={className}
       disabled={busy || disabled}
+      aria-busy={busy}
       onClick={async () => {
         setBusy(true);
         try {
           await onClick();
+          buzz();
+          if (done) toast(done);
         } catch (e) {
-          alert((e as Error).message);
+          toast((e as Error).message, 'error');
         } finally {
           setBusy(false);
         }
       }}
     >
+      {busy ? <LuLoaderCircle className="spin" /> : null}
       {children}
     </button>
   );
@@ -107,20 +229,125 @@ function Busy({ onClick, children, className = 'btn-line', disabled }: { onClick
 
 function LinkBox({ link, name }: { link: string; name: string }) {
   return (
-    <div className="mt-3 rounded-2xl border border-gold/30 bg-gold/[0.06] p-3.5">
-      <p className="text-[13px] text-muted">
+    <div className="rise mt-3 rounded-2xl border border-gold/25 bg-gold/[0.06] p-4">
+      <p className="text-[13px] leading-5 text-muted">
         {name}’s personal link. Send it to them privately: whoever opens it is signed in as {name}.
       </p>
-      <p className="mt-2 break-all font-mono text-[12.5px] text-ink">{link}</p>
+      <p className="mt-2 break-all rounded-xl bg-black/30 px-3 py-2 font-mono text-[12.5px] text-ink">{link}</p>
       <div className="mt-3 flex gap-2">
         <button type="button" className="btn-gold h-9" onClick={() => void share(`Your Weekend Pot link (keep it to yourself): ${link}`)}>
           <LuShare2 /> Send
         </button>
-        <button type="button" className="btn-line h-9" onClick={() => void navigator.clipboard.writeText(link)}>
+        <button
+          type="button"
+          className="btn-line h-9"
+          onClick={() => {
+            void navigator.clipboard.writeText(link);
+            toast('Link copied');
+          }}
+        >
           <LuCopy /> Copy
         </button>
       </div>
     </div>
+  );
+}
+
+const CONFETTI_COLORS = ['#f2c14e', '#38d6ff', '#2fd497', '#ffffff', '#ffd978'];
+function Confetti() {
+  const bits = useMemo(
+    () =>
+      Array.from({ length: 16 }, (_, i) => {
+        const a = (i / 16) * Math.PI * 2 + Math.random() * 0.4;
+        const dist = 70 + Math.random() * 70;
+        return {
+          '--x': `${Math.cos(a) * dist}px`,
+          '--y': `${Math.sin(a) * dist - 30}px`,
+          '--r': `${(Math.random() - 0.5) * 540}deg`,
+          '--d': `${Math.random() * 120}ms`,
+          background: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+        } as CSSProperties;
+      }),
+    [],
+  );
+  return (
+    <span className="confetti" aria-hidden>
+      {bits.map((style, i) => (
+        <i key={i} style={style} />
+      ))}
+    </span>
+  );
+}
+
+/** Confetti for a win, once per phone. */
+function useFirstView(key: string, active: boolean) {
+  const [show] = useState(() => {
+    if (!active || reducedMotion()) return false;
+    try {
+      if (localStorage.getItem(key)) return false;
+      localStorage.setItem(key, '1');
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  return show;
+}
+
+// ── The page around everything ────────────────────────────────────────────
+
+function Backdrop() {
+  return (
+    <div className="backdrop" aria-hidden>
+      <div className="aurora" />
+      <div className="grid-lines" />
+    </div>
+  );
+}
+
+function Mark({ size = 40 }: { size?: number }) {
+  return (
+    <span className="relative grid shrink-0 place-items-center rounded-[30%] bg-gradient-to-br from-[#1b1f2b] to-[#0c0f16] ring-1 ring-white/10" style={{ width: size, height: size }}>
+      <span className="absolute inset-0 rounded-[30%] bg-[radial-gradient(circle_at_30%_20%,rgba(242,193,78,0.35),transparent_60%)]" />
+      <LuCoins className="relative text-gold" style={{ fontSize: size * 0.5 }} />
+    </span>
+  );
+}
+
+function Shell({ children }: { children: ReactNode }) {
+  return (
+    <>
+      <Backdrop />
+      <Toasts />
+      <AskSheet />
+      <div className="relative z-10 mx-auto min-h-dvh max-w-xl px-4 pb-16 pt-[max(1rem,env(safe-area-inset-top))]">
+        {children}
+        <p className="mt-12 text-center text-[11.5px] leading-5 text-faint">
+          A private pot between friends · 18+ · nobody takes a cut
+          <br />
+          Winners come from Utopia’s game records
+        </p>
+      </div>
+    </>
+  );
+}
+
+function Skeletons() {
+  return (
+    <Shell>
+      <div className="mb-6 flex items-center gap-3 pt-2">
+        <div className="skeleton h-11 w-11 rounded-2xl" />
+        <div className="flex-1 space-y-2">
+          <div className="skeleton h-3 w-20 rounded-full" />
+          <div className="skeleton h-6 w-40 rounded-full" />
+        </div>
+      </div>
+      <div className="space-y-4">
+        {[0, 1].map((i) => (
+          <div key={i} className="card skeleton h-40" />
+        ))}
+      </div>
+    </Shell>
   );
 }
 
@@ -133,19 +360,20 @@ function Setup({ done }: { done: () => void }) {
   const [link, setLink] = useState<string | null>(null);
   return (
     <Shell>
-      <div className="card p-6">
-        <h1 className="text-2xl font-bold">Set up Weekend Pot</h1>
+      <div className="card card-live rise mt-[8vh] p-6">
+        <Mark size={48} />
+        <h1 className="display mt-5 text-[28px] font-bold leading-tight">Set up Weekend Pot</h1>
         <p className="mt-2 text-[14px] leading-6 text-muted">You’re the first holder: you confirm deposits and send the winnings. Add your friends next.</p>
         {link ? (
           <>
             <LinkBox link={link} name={name} />
             <p className="mt-3 text-[13px] text-muted">Keep your link somewhere safe: it’s how you sign in on another phone.</p>
-            <button type="button" className="btn-gold mt-4" onClick={done}>
+            <button type="button" className="btn-gold mt-5 w-full" onClick={done}>
               Continue
             </button>
           </>
         ) : (
-          <div className="mt-5 space-y-3.5">
+          <div className="mt-6 space-y-4">
             <label className="block">
               <span className="label">Setup key (from the secrets)</span>
               <input className="field" value={key} onChange={(e) => setKey(e.target.value)} type="password" autoComplete="off" />
@@ -158,7 +386,7 @@ function Setup({ done }: { done: () => void }) {
               <span className="label">Your Utopia username</span>
               <input className="field" value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="off" placeholder="iamjake" />
             </label>
-            <Busy className="btn-gold" disabled={!key || !name || !username} onClick={async () => setLink((await api.setup(key, name, username)).link)}>
+            <Busy className="btn-gold w-full" disabled={!key || !name || !username} onClick={async () => setLink((await api.setup(key, name, username)).link)}>
               Create the group
             </Busy>
           </div>
@@ -172,10 +400,12 @@ function SignedOut() {
   const old = new URLSearchParams(location.search).get('link') === 'old';
   return (
     <Shell>
-      <div className="card p-6 text-center">
-        <LuWallet className="mx-auto text-[34px] text-gold" />
-        <h1 className="mt-4 text-xl font-bold">Weekend Pot is private</h1>
-        <p className="mt-2 text-[14px] leading-6 text-muted">
+      <div className="card card-live rise mt-[18vh] p-7 text-center">
+        <span className="mx-auto block w-fit">
+          <Mark size={56} />
+        </span>
+        <h1 className="display mt-5 text-[24px] font-bold">Weekend Pot is private</h1>
+        <p className="mx-auto mt-2 max-w-xs text-[14px] leading-6 text-muted">
           {old ? 'That link has been replaced. Ask the holder for your new one.' : 'Open the personal link the holder sent you to sign in.'}
         </p>
       </div>
@@ -183,25 +413,14 @@ function SignedOut() {
   );
 }
 
-function Shell({ children }: { children: ReactNode }) {
-  return (
-    <div className="mx-auto min-h-dvh max-w-xl px-4 pb-16 pt-[max(1.25rem,env(safe-area-inset-top))]">
-      {children}
-      <p className="mt-10 text-center text-[11.5px] leading-5 text-faint">
-        A private pot between friends, 18+. Nobody takes a cut.
-        <br />
-        Winners come from Utopia’s game records.
-      </p>
-    </div>
-  );
-}
-
 // ── A pot ─────────────────────────────────────────────────────────────────
 
-function PotCard({ pot, s, refresh }: { pot: Pot; s: State; refresh: () => Promise<void> }) {
+function PotCard({ pot, s, refresh, index }: { pot: Pot; s: State; refresh: () => Promise<void>; index: number }) {
   const f = useFormat(s.settings);
   // Open while there's something to do or see: joining, playing, and the result until it's paid out.
   const [open, setOpen] = useState(pot.phase === 'joining' || pot.phase === 'playing' || pot.phase === 'decided');
+  // A folded pot's insides are only built once it's first opened (and kept, to fold away smoothly).
+  const [built, setBuilt] = useState(open);
   const [note, setNote] = useState('');
   const [manual, setManual] = useState<number[]>([]);
   const [why, setWhy] = useState('');
@@ -211,6 +430,9 @@ function PotCard({ pot, s, refresh }: { pot: Pot; s: State; refresh: () => Promi
   const paid = pot.entries.filter((e) => e.state === 'paid');
   const total = pot.stake * paid.length;
   const d = pot.decision;
+  const won = d?.kind === 'decided' && !d.refund;
+  const confetti = useFirstView(`wp.won.${pot.id}`, won && pot.phase === 'decided');
+  const live = pot.phase === 'joining' || pot.phase === 'playing';
   const act = async (action: string, body: Record<string, unknown> = {}) => {
     await api.pot(pot.id, action, body);
     await refresh();
@@ -222,8 +444,8 @@ function PotCard({ pot, s, refresh }: { pot: Pot; s: State; refresh: () => Promi
         <LuClock /> Joining · closes {f.when(pot.starts_at)}
       </Badge>
     ) : pot.phase === 'playing' ? (
-      <Badge tone="win">
-        <LuGamepad2 /> Playing · until {f.when(pot.ends_at)}
+      <Badge tone="cyan">
+        <span className="live-dot mr-1" /> Playing · until {f.when(pot.ends_at)}
       </Badge>
     ) : pot.phase === 'decided' ? (
       <Badge tone="warn">Decided · paying out</Badge>
@@ -235,21 +457,6 @@ function PotCard({ pot, s, refresh }: { pot: Pot; s: State; refresh: () => Promi
       <Badge tone="danger">Cancelled</Badge>
     );
 
-  const result =
-    d && (d.kind === 'decided' || d.kind === 'cancelled') ? (
-      <div className="mt-4 rounded-2xl bg-white/[0.04] p-4">
-        {d.kind === 'decided' && !d.refund ? (
-          <p className="flex items-center gap-2 text-[17px] font-bold">
-            <LuTrophy className="text-gold" />
-            {(d.winners ?? []).map(name).join(' & ')} {(d.winners ?? []).length > 1 ? 'share' : 'wins'} {f.money(total)}
-          </p>
-        ) : (
-          <p className="text-[16px] font-bold">Everyone gets their stake back</p>
-        )}
-        {d.reason && <p className="mt-1 text-[13.5px] text-muted">{d.reason}</p>}
-      </div>
-    ) : null;
-
   const shareText = () => {
     const lines = [`💰 ${pot.title}: ${f.money(pot.stake)} each, ${GAME_LABEL[pot.game]} (${RULE_LABEL[pot.rule].toLowerCase()})`];
     if (pot.phase === 'joining') lines.push(`Join and pay before ${f.when(pot.starts_at)}: ${location.origin}`);
@@ -259,17 +466,25 @@ function PotCard({ pot, s, refresh }: { pot: Pot; s: State; refresh: () => Promi
   };
 
   return (
-    <article className="card overflow-hidden">
-      <button type="button" className="flex w-full items-start gap-3 p-5 text-left" onClick={() => setOpen((o) => !o)}>
-        <span className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-gold/15 text-[20px] text-gold">
-          <LuCoins />
+    <article className={`rise overflow-hidden ${live || pot.phase === 'decided' ? 'card card-live' : 'card'}`} style={{ '--d': `${Math.min(index, 6) * 70}ms` } as CSSProperties}>
+      <button
+        type="button"
+        aria-expanded={open}
+        className="flex w-full items-start gap-3.5 p-5 text-left"
+        onClick={() => {
+          setBuilt(true);
+          setOpen((o) => !o);
+        }}
+      >
+        <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-gold/25 to-gold/5 text-[21px] text-gold ring-1 ring-gold/20">
+          {pot.game === 'any' ? <LuCoins /> : <LuGamepad2 />}
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[17px] font-bold">{pot.title}</span>
+          <span className="display block truncate text-[18px] font-bold">{pot.title}</span>
           <span className="mt-0.5 block text-[13px] text-muted">
             {GAME_LABEL[pot.game]} · {RULE_LABEL[pot.rule]} · {f.money(pot.stake)} each
           </span>
-          <span className="mt-2 flex flex-wrap gap-1.5">
+          <span className="mt-2.5 flex flex-wrap gap-1.5">
             {phaseBadge}
             {d?.kind === 'decided' && (
               <Badge tone="gold">
@@ -279,143 +494,165 @@ function PotCard({ pot, s, refresh }: { pot: Pot; s: State; refresh: () => Promi
           </span>
         </span>
         <span className="text-right">
-          <span className="block text-[18px] font-bold tabular-nums">{f.money(total)}</span>
+          <Money value={total} format={f.money} className="display block text-[22px] font-bold leading-tight" />
           <span className="block text-[11.5px] text-faint">{paid.length} paid</span>
         </span>
       </button>
 
-      {open && (
-        <div className="border-t border-line px-5 pb-5 pt-4">
-          {result}
-
-          {d?.kind === 'needs_admin' && (
-            <div className="mb-4 rounded-2xl border border-warn/30 bg-warn/[0.07] p-4 text-[14px]">
-              <p className="font-semibold text-warn">The holder needs to decide this one</p>
-              <p className="mt-1 text-muted">{d.reason}</p>
-            </div>
-          )}
-
-          {/* Your part */}
-          {pot.phase === 'joining' && !mine && (
-            <Busy className="btn-gold w-full" onClick={() => act('join')}>
-              Join for {f.money(pot.stake)}
-            </Busy>
-          )}
-          {pot.phase === 'joining' && mine && mine.state !== 'paid' && (
-            <div className="rounded-2xl bg-white/[0.04] p-4">
-              <p className="text-[14px] font-semibold">
-                {mine.state === 'sent' ? 'Waiting for the holder to confirm your payment' : `Send ${f.money(pot.stake)} to the holder`}
-              </p>
-              {s.settings.treasurer && <p className="mt-1.5 whitespace-pre-line text-[13.5px] leading-6 text-muted">{s.settings.treasurer}</p>}
-              <p className="mt-1.5 text-[13px] text-faint">
-                Reference: POT-{pot.id} {s.me.name}
-              </p>
-              {mine.state === 'joined' && (
-                <div className="mt-3 flex gap-2">
-                  <input className="field h-10" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note (optional), e.g. sent from OPay" />
-                  <Busy className="btn-gold shrink-0" onClick={() => act('sent', { note })}>
-                    I’ve sent it
-                  </Busy>
-                </div>
-              )}
-              <Busy className="btn-ghost -ml-3 mt-1 h-8 text-[13px]" onClick={() => act('leave')}>
-                Leave this pot
-              </Busy>
-            </div>
-          )}
-          {pot.status === 'open' && mine?.state === 'paid' && (
-            <p className="rounded-2xl bg-win/10 p-4 text-[14px] text-win">
-              <b>You’re in.</b> Play {pot.game === 'any' ? 'Ludo, Crazy Eights, Chess or Checkers' : GAME_LABEL[pot.game]} in Utopia with exactly the
-              paid players below, between {f.when(pot.starts_at)} and {f.when(pot.ends_at)}.
-            </p>
-          )}
-
-          {/* Players */}
-          <h3 className="mb-2 mt-5 text-[12px] font-semibold uppercase tracking-wide text-faint">Players</h3>
-          {pot.entries.length === 0 ? (
-            <p className="text-[14px] text-muted">Nobody has joined yet.</p>
-          ) : (
-            <ul className="space-y-2">
-              {pot.entries.map((e) => (
-                <PlayerRow key={e.member_id} e={e} pot={pot} name={name(e.member_id)} admin={admin} money={f.money} act={act} />
-              ))}
-            </ul>
-          )}
-
-          {/* Games found */}
-          {pot.phase !== 'joining' && pot.status !== 'cancelled' && (
-            <>
-              <h3 className="mb-2 mt-5 flex items-center justify-between text-[12px] font-semibold uppercase tracking-wide text-faint">
-                Games in Utopia
-                {pot.status === 'open' && (
-                  <Busy className="btn-ghost h-7 px-2 text-[12px] normal-case tracking-normal" onClick={() => act('check')}>
-                    <LuRefreshCw /> Check now
-                  </Busy>
+      <div className={`expand ${open ? 'open' : ''}`}>
+        <div>
+          {built && (
+          <div className="border-t border-white/[0.06] px-5 pb-5 pt-4">
+            {d && (d.kind === 'decided' || d.kind === 'cancelled') && (
+              <div className="relative mb-4 overflow-visible rounded-2xl bg-gradient-to-br from-gold/[0.12] to-transparent p-4 ring-1 ring-gold/15">
+                {confetti && <Confetti />}
+                {d.kind === 'decided' && !d.refund ? (
+                  <p className="display flex items-center gap-2 text-[19px] font-bold">
+                    <LuTrophy className="shrink-0 text-gold" />
+                    <span className="shine">
+                      {(d.winners ?? []).map(name).join(' & ')} {(d.winners ?? []).length > 1 ? 'share' : 'wins'} {f.money(total)}
+                    </span>
+                  </p>
+                ) : (
+                  <p className="display text-[17px] font-bold">Everyone gets their stake back</p>
                 )}
-              </h3>
-              {d?.games?.length ? (
-                <ul className="space-y-1.5 text-[14px]">
-                  {d.games.map((g) => (
-                    <li key={g.matchId} className="flex items-center justify-between gap-3 rounded-xl bg-white/[0.03] px-3 py-2">
-                      <span>
-                        {GAME_LABEL[g.game]} · {f.clock(g.endedAt)}
-                      </span>
-                      <span className={g.verdict === 'counted' ? 'font-semibold' : 'text-faint'}>
-                        {g.verdict === 'abandoned' ? 'Abandoned, doesn’t count' : g.verdict === 'disputed' ? 'Disputed' : g.winner ? `${name(g.winner)} won` : 'Draw'}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-[14px] text-muted">
-                  {d?.note ?? 'No game between exactly the paid players yet.'} {pot.checked_at ? `Checked ${ago(pot.checked_at)}.` : ''}
-                </p>
-              )}
-            </>
-          )}
-
-          {/* The holder deciding by hand */}
-          {admin && pot.status === 'open' && pot.phase === 'playing' && (
-            <details className="mt-5 rounded-2xl bg-white/[0.03] p-4" open={d?.kind === 'needs_admin'}>
-              <summary className="cursor-pointer text-[14px] font-semibold">Decide by hand</summary>
-              <p className="mt-2 text-[13px] text-muted">For a disputed game, or anything the app can’t see. Everyone sees your reason.</p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {paid.map((e) => (
-                  <button
-                    key={e.member_id}
-                    type="button"
-                    className={`btn h-9 border ${manual.includes(e.member_id) ? 'border-gold bg-gold/15 text-gold' : 'border-line text-muted'}`}
-                    onClick={() => setManual((m) => (m.includes(e.member_id) ? m.filter((x) => x !== e.member_id) : [...m, e.member_id]))}
-                  >
-                    {name(e.member_id)}
-                  </button>
-                ))}
+                {d.reason && <p className="mt-1 text-[13.5px] text-muted">{d.reason}</p>}
               </div>
-              <input className="field mt-3" value={why} onChange={(e) => setWhy(e.target.value)} placeholder="Why, e.g. Tobi won the disputed Ludo game, all agreed" />
-              <Busy className="btn-gold mt-3" disabled={!manual.length || !why.trim()} onClick={() => act('decide', { winners: manual, reason: why })}>
-                {manual.length === paid.length ? 'Refund everyone' : 'Pay the winner'}
-                {manual.length > 1 && manual.length < paid.length ? 's' : ''}
-              </Busy>
-            </details>
-          )}
+            )}
 
-          <div className="mt-5 flex flex-wrap gap-2">
-            <button type="button" className="btn-line h-9" onClick={() => void share(shareText())}>
-              <LuShare2 /> Share
-            </button>
-            {admin && pot.status === 'open' && (
-              <Busy
-                className="btn-ghost h-9 text-danger"
-                onClick={async () => {
-                  if (confirm('Cancel this pot? Everyone who paid gets their stake back.')) await act('cancel', {});
-                }}
-              >
-                Cancel pot
+            {d?.kind === 'needs_admin' && (
+              <div className="mb-4 rounded-2xl border border-warn/30 bg-warn/[0.07] p-4 text-[14px]">
+                <p className="font-semibold text-warn">The holder needs to decide this one</p>
+                <p className="mt-1 text-muted">{d.reason}</p>
+              </div>
+            )}
+
+            {/* Your part */}
+            {pot.phase === 'joining' && !mine && (
+              <Busy className="btn-gold h-12 w-full text-[15px]" onClick={() => act('join')} done="You’re in the pot">
+                Join for {f.money(pot.stake)}
               </Busy>
             )}
+            {pot.phase === 'joining' && mine && mine.state !== 'paid' && (
+              <div className="rounded-2xl bg-black/25 p-4 ring-1 ring-white/[0.05]">
+                <p className="text-[14px] font-semibold">
+                  {mine.state === 'sent' ? 'Waiting for the holder to confirm your payment' : `Send ${f.money(pot.stake)} to the holder`}
+                </p>
+                {s.settings.treasurer && <p className="mt-2 whitespace-pre-line text-[13.5px] leading-6 text-muted">{s.settings.treasurer}</p>}
+                <p className="mt-1.5 text-[12.5px] text-faint">
+                  Reference: <span className="font-mono text-muted">POT-{pot.id} {s.me.name}</span>
+                </p>
+                {mine.state === 'joined' && (
+                  <div className="mt-3 flex gap-2">
+                    <input className="field h-10" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note (optional), e.g. sent from OPay" />
+                    <Busy className="btn-gold shrink-0" onClick={() => act('sent', { note })} done="Told the holder">
+                      I’ve sent it
+                    </Busy>
+                  </div>
+                )}
+                <Busy className="btn-ghost -ml-3 mt-1 h-8 text-[13px]" onClick={() => act('leave')}>
+                  Leave this pot
+                </Busy>
+              </div>
+            )}
+            {pot.status === 'open' && mine?.state === 'paid' && (
+              <p className="rounded-2xl bg-win/[0.08] p-4 text-[14px] leading-6 text-win ring-1 ring-win/15">
+                <b>You’re in.</b> Play {pot.game === 'any' ? 'Ludo, Crazy Eights, Chess or Checkers' : GAME_LABEL[pot.game]} in Utopia with exactly the
+                paid players below, between {f.when(pot.starts_at)} and {f.when(pot.ends_at)}.
+              </p>
+            )}
+
+            {/* Players */}
+            <h3 className="label mb-2 mt-5">Players</h3>
+            {pot.entries.length === 0 ? (
+              <p className="text-[14px] text-muted">Nobody has joined yet.</p>
+            ) : (
+              <ul className="space-y-2">
+                {pot.entries.map((e) => (
+                  <PlayerRow key={e.member_id} e={e} pot={pot} name={name(e.member_id)} admin={admin} money={f.money} act={act} />
+                ))}
+              </ul>
+            )}
+
+            {/* Games found */}
+            {pot.phase !== 'joining' && pot.status !== 'cancelled' && (
+              <>
+                <div className="mb-2 mt-5 flex items-center justify-between">
+                  <h3 className="label mb-0">Games in Utopia</h3>
+                  {pot.status === 'open' && (
+                    <Busy className="btn-ghost h-7 px-2 text-[12px]" onClick={() => act('check')}>
+                      <LuRefreshCw /> Check now
+                    </Busy>
+                  )}
+                </div>
+                {d?.games?.length ? (
+                  <ul className="space-y-1.5 text-[14px]">
+                    {d.games.map((g) => (
+                      <li key={g.matchId} className="fade flex items-center justify-between gap-3 rounded-xl bg-white/[0.03] px-3 py-2 ring-1 ring-white/[0.04]">
+                        <span>
+                          {GAME_LABEL[g.game]} · {f.clock(g.endedAt)}
+                        </span>
+                        <span className={g.verdict === 'counted' ? 'font-semibold' : 'text-faint'}>
+                          {g.verdict === 'abandoned' ? 'Abandoned, doesn’t count' : g.verdict === 'disputed' ? 'Disputed' : g.winner ? `${name(g.winner)} won` : 'Draw'}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-[14px] text-muted">
+                    {d?.note ?? 'No game between exactly the paid players yet.'} {pot.checked_at ? `Checked ${ago(pot.checked_at)}.` : ''}
+                  </p>
+                )}
+              </>
+            )}
+
+            {/* The holder deciding by hand */}
+            {admin && pot.status === 'open' && pot.phase === 'playing' && (
+              <details className="mt-5 rounded-2xl bg-white/[0.03] p-4 ring-1 ring-white/[0.05]" open={d?.kind === 'needs_admin'}>
+                <summary className="cursor-pointer text-[14px] font-semibold">Decide by hand</summary>
+                <p className="mt-2 text-[13px] text-muted">For a disputed game, or anything the app can’t see. Everyone sees your reason.</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {paid.map((e) => (
+                    <button
+                      key={e.member_id}
+                      type="button"
+                      className={`btn h-9 border ${manual.includes(e.member_id) ? 'border-gold bg-gold/15 text-gold' : 'border-white/10 text-muted'}`}
+                      onClick={() => setManual((m) => (m.includes(e.member_id) ? m.filter((x) => x !== e.member_id) : [...m, e.member_id]))}
+                    >
+                      {name(e.member_id)}
+                    </button>
+                  ))}
+                </div>
+                <input className="field mt-3" value={why} onChange={(e) => setWhy(e.target.value)} placeholder="Why, e.g. Tobi won the disputed Ludo game, all agreed" />
+                <Busy className="btn-gold mt-3" disabled={!manual.length || !why.trim()} onClick={() => act('decide', { winners: manual, reason: why })} done="Decided">
+                  {manual.length === paid.length ? 'Refund everyone' : 'Pay the winner'}
+                  {manual.length > 1 && manual.length < paid.length ? 's' : ''}
+                </Busy>
+              </details>
+            )}
+
+            <div className="mt-5 flex flex-wrap gap-2">
+              <button type="button" className="btn-line h-9" onClick={() => void share(shareText())}>
+                <LuShare2 /> Share
+              </button>
+              {admin && pot.status === 'open' && (
+                <Busy
+                  className="btn-ghost h-9 text-danger"
+                  onClick={async () => {
+                    if (await ask('Cancel this pot?', { detail: 'Everyone who paid gets their stake back.', yes: 'Cancel pot', danger: true })) {
+                      await act('cancel', {});
+                      toast('Pot cancelled');
+                    }
+                  }}
+                >
+                  Cancel pot
+                </Busy>
+              )}
+            </div>
           </div>
+          )}
         </div>
-      )}
+      </div>
     </article>
   );
 }
@@ -449,8 +686,8 @@ function PlayerRow({
       <Badge tone="muted">Joined</Badge>
     );
   return (
-    <li className="flex items-center gap-3 rounded-2xl bg-white/[0.03] p-2.5">
-      <Initial name={name} />
+    <li className="flex items-center gap-3 rounded-2xl bg-white/[0.03] p-2.5 ring-1 ring-white/[0.04] transition-colors">
+      <Initial name={name} id={e.member_id} />
       <div className="min-w-0 flex-1">
         <p className="truncate text-[14.5px] font-semibold">{name}</p>
         <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
@@ -495,7 +732,7 @@ function nextAt(dayOffset: number, hour: number) {
   return d;
 }
 
-function NewPot({ s, done }: { s: State; done: () => Promise<void> }) {
+function NewPot({ s, done, close }: { s: State; done: () => Promise<void>; close: () => void }) {
   const [title, setTitle] = useState('Saturday Ludo');
   const [game, setGame] = useState<Game>('ludo');
   const [rule, setRule] = useState<Rule>('first');
@@ -504,9 +741,14 @@ function NewPot({ s, done }: { s: State; done: () => Promise<void> }) {
   const [starts, setStarts] = useState(localInput(nextAt(saturday, 19)));
   const [ends, setEnds] = useState(localInput(nextAt(saturday + 1, 23)));
   return (
-    <div className="card p-5">
-      <h2 className="text-lg font-bold">New pot</h2>
-      <div className="mt-4 space-y-3.5">
+    <div className="card card-live rise p-5">
+      <div className="flex items-center justify-between">
+        <h2 className="display text-[19px] font-bold">New pot</h2>
+        <button type="button" className="btn-ghost h-8 px-2 text-[13px]" onClick={close}>
+          Close
+        </button>
+      </div>
+      <div className="mt-4 space-y-4">
         <label className="block">
           <span className="label">Title</span>
           <input className="field" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={60} />
@@ -535,7 +777,8 @@ function NewPot({ s, done }: { s: State; done: () => Promise<void> }) {
                 key={r}
                 type="button"
                 onClick={() => setRule(r)}
-                className={`rounded-2xl border p-3 text-left text-[13px] ${rule === r ? 'border-gold bg-gold/10' : 'border-line'}`}
+                aria-pressed={rule === r}
+                className={`rounded-2xl border p-3 text-left text-[13px] transition-colors ${rule === r ? 'border-gold/70 bg-gold/10' : 'border-white/10 bg-black/20'}`}
               >
                 <b className="block text-[14px]">{RULE_LABEL[r]}</b>
                 <span className="text-muted">
@@ -557,14 +800,15 @@ function NewPot({ s, done }: { s: State; done: () => Promise<void> }) {
         </div>
         <p className="text-[12.5px] leading-5 text-faint">Joining and paying close when the games start. Only games between exactly the paid players count.</p>
         <Busy
-          className="btn-gold w-full"
+          className="btn-gold h-12 w-full text-[15px]"
           disabled={!title.trim() || !Number(stake)}
+          done="Pot created"
           onClick={async () => {
             await api.newPot({ title, game, rule, stake: Number(stake), starts_at: new Date(starts).toISOString(), ends_at: new Date(ends).toISOString() });
             await done();
           }}
         >
-          Create the pot
+          <LuSparkles /> Create the pot
         </Busy>
       </div>
     </div>
@@ -584,25 +828,27 @@ function Table({ s }: { s: State }) {
     })
     .sort((a, b) => b.net - a.net);
   return (
-    <div className="card overflow-hidden">
-      <div className="grid grid-cols-[1fr_auto_auto] gap-x-4 border-b border-line px-5 py-3 text-[11.5px] font-semibold uppercase tracking-wide text-faint">
-        <span>Player</span>
-        <span className="text-right">Won</span>
-        <span className="w-24 text-right">Net</span>
+    <div className="card rise overflow-hidden">
+      <div className="grid grid-cols-[1fr_auto] gap-x-4 border-b border-white/[0.06] px-5 py-3 min-[440px]:grid-cols-[1fr_auto_auto]">
+        <span className="label mb-0">Player</span>
+        <span className="label mb-0 hidden text-right min-[440px]:block">Won</span>
+        <span className="label mb-0 w-24 text-right">Net</span>
       </div>
-      {rows.map(({ m, won, net, owed, played, potsWon }) => (
-        <div key={m.id} className="grid grid-cols-[1fr_auto_auto] items-center gap-x-4 border-b border-line/60 px-5 py-3 last:border-0">
+      {rows.map(({ m, won, net, owed, played, potsWon }, i) => (
+        <div key={m.id} className="grid grid-cols-[1fr_auto] items-center gap-x-4 border-b border-white/[0.04] px-5 py-3 last:border-0 min-[440px]:grid-cols-[1fr_auto_auto]">
           <span className="flex min-w-0 items-center gap-3">
-            <Initial name={m.name} />
+            <span className="w-4 text-center text-[12px] font-bold text-faint">{i + 1}</span>
+            <Initial name={m.name} id={m.id} />
             <span className="min-w-0">
               <span className="block truncate font-semibold">{m.name}</span>
-              <span className="block text-[12px] text-faint">
-                won {potsWon} of {played} {played === 1 ? 'pot' : 'pots'}{owed > 0 ? ` · owed ${f.money(owed)}` : ''}
+              <span className="block truncate text-[12px] text-faint">
+                won {potsWon} of {played} {played === 1 ? 'pot' : 'pots'}
+                {owed > 0 ? ` · owed ${f.money(owed)}` : ''}
               </span>
             </span>
           </span>
-          <span className="text-right tabular-nums text-muted">{f.money(won)}</span>
-          <span className={`w-24 text-right font-bold tabular-nums ${net > 0 ? 'text-win' : net < 0 ? 'text-danger' : 'text-muted'}`}>
+          <span className="hidden text-right tabular-nums text-muted min-[440px]:block">{f.money(won)}</span>
+          <span className={`display w-24 text-right font-bold tabular-nums ${net > 0 ? 'text-win' : net < 0 ? 'text-danger' : 'text-muted'}`}>
             {net > 0 ? '+' : ''}
             {f.money(net)}
           </span>
@@ -619,16 +865,16 @@ function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
   const [settings, setSettings] = useState(s.settings);
   return (
     <div className="space-y-4">
-      <div className="card p-5">
-        <h2 className="flex items-center gap-2 text-lg font-bold">
+      <div className="card rise p-5">
+        <h2 className="display flex items-center gap-2 text-[19px] font-bold">
           <LuUsers className="text-gold" /> The group
         </h2>
         <ul className="mt-3 space-y-2">
           {s.members.map((m: Member) => (
-            <li key={m.id} className="flex items-center gap-3 rounded-2xl bg-white/[0.03] p-2.5">
-              <Initial name={m.name} />
+            <li key={m.id} className="flex items-center gap-3 rounded-2xl bg-white/[0.03] p-2.5 ring-1 ring-white/[0.04]">
+              <Initial name={m.name} id={m.id} />
               <span className="min-w-0 flex-1">
-                <span className="block truncate font-semibold">
+                <span className="flex items-center gap-1.5 truncate font-semibold">
                   {m.name} {m.is_admin ? <Badge tone="gold">Holder</Badge> : null}
                 </span>
                 <span className="block text-[12.5px] text-faint">@{m.utopia_username} in Utopia</span>
@@ -646,8 +892,9 @@ function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
                 <Busy
                   className="btn-ghost h-8 px-2 text-[12.5px]"
                   onClick={async () => {
-                    if (!confirm(`${m.is_admin ? 'Stop' : 'Make'} ${m.name} ${m.is_admin ? 'being a holder' : 'a holder'}? Holders confirm deposits and payouts.`)) return;
-                    await api.member(m.id, 'admin', { on: !m.is_admin });
+                    const on = !m.is_admin;
+                    if (!(await ask(on ? `Make ${m.name} a holder?` : `Stop ${m.name} being a holder?`, { detail: 'Holders confirm deposits and send payouts.', yes: on ? 'Make holder' : 'Stop' }))) return;
+                    await api.member(m.id, 'admin', { on });
                     await refresh();
                   }}
                 >
@@ -658,9 +905,10 @@ function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
                 <Busy
                   className="btn-ghost h-8 px-2 text-[12.5px] text-danger"
                   onClick={async () => {
-                    if (!confirm(`Remove ${m.name}? Their link stops working.`)) return;
+                    if (!(await ask(`Remove ${m.name}?`, { detail: 'Their link stops working. Their history stays.', yes: 'Remove', danger: true }))) return;
                     await api.member(m.id, 'remove');
                     await refresh();
+                    toast(`${m.name} removed`);
                   }}
                 >
                   Remove
@@ -695,11 +943,11 @@ function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
         </Busy>
       </div>
 
-      <div className="card p-5">
-        <h2 className="flex items-center gap-2 text-lg font-bold">
+      <div className="card rise p-5" style={{ '--d': '80ms' } as CSSProperties}>
+        <h2 className="display flex items-center gap-2 text-[19px] font-bold">
           <LuWallet className="text-gold" /> Settings
         </h2>
-        <div className="mt-4 space-y-3.5">
+        <div className="mt-4 space-y-4">
           <label className="block">
             <span className="label">Group name</span>
             <input className="field" value={settings.group_name} onChange={(e) => setSettings({ ...settings, group_name: e.target.value })} />
@@ -725,6 +973,7 @@ function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
           </label>
           <Busy
             className="btn-gold"
+            done="Saved"
             onClick={async () => {
               await api.settings(settings);
               await refresh();
@@ -738,6 +987,7 @@ function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
       <Busy
         className="btn-ghost"
         onClick={async () => {
+          if (!(await ask('Sign out on this phone?', { detail: 'You’ll need your personal link to sign back in.', yes: 'Sign out' }))) return;
           await api.signOut();
           location.reload();
         }}
@@ -752,16 +1002,47 @@ function Holder({ s, refresh }: { s: State; refresh: () => Promise<void> }) {
 
 type Tab = 'pots' | 'table' | 'holder';
 
+function Tabs({ tabs, tab, setTab }: { tabs: [Tab, string][]; tab: Tab; setTab: (t: Tab) => void }) {
+  const i = Math.max(0, tabs.findIndex(([id]) => id === tab));
+  return (
+    <nav className="relative grid rounded-full border border-white/10 bg-black/40 p-1" style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}>
+      <span
+        aria-hidden
+        className="absolute bottom-1 left-1 top-1 rounded-full bg-gradient-to-b from-[#ffd978] to-[#f2b63e] shadow-[0_6px_20px_-8px_rgba(242,193,78,0.8)]"
+        style={{ width: `calc((100% - 8px) / ${tabs.length})`, transform: `translateX(${i * 100}%)`, transition: 'transform 0.38s var(--ease)' }}
+      />
+      {tabs.map(([id, label]) => (
+        <button
+          key={id}
+          type="button"
+          onClick={() => setTab(id)}
+          aria-current={tab === id ? 'page' : undefined}
+          className={`relative z-10 h-9 rounded-full px-3.5 text-[13.5px] font-semibold transition-colors ${tab === id ? 'text-[#1a1406]' : 'text-muted hover:text-ink'}`}
+        >
+          {label}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
 export function App() {
   const [hello, setHello] = useState<{ setup: boolean; signed_in: boolean } | null>(null);
   const [s, setS] = useState<State | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('pots');
   const [creating, setCreating] = useState(false);
+  const last = useRef('');
 
+  // Only a change redraws the page: the 30-second refresh usually brings nothing new.
   const refresh = useCallback(async () => {
     try {
-      setS(await api.state());
+      const next = await api.state();
+      const key = JSON.stringify(next);
+      if (key !== last.current) {
+        last.current = key;
+        setS(next);
+      }
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -778,17 +1059,35 @@ export function App() {
       .catch((e) => setError((e as Error).message));
   }, [refresh]);
 
-  // Fresh numbers every 30 seconds while the page is open.
+  // Fresh numbers every 30 seconds while the page is open, and on coming back to it.
   useEffect(() => {
     if (!hello?.signed_in) return;
     const id = setInterval(() => document.visibilityState === 'visible' && void refresh(), 30_000);
-    return () => clearInterval(id);
+    const back = () => document.visibilityState === 'visible' && void refresh();
+    document.addEventListener('visibilitychange', back);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', back);
+    };
   }, [hello, refresh]);
 
-  if (!hello) return <Shell>{error ? <p className="text-danger">{error}</p> : <p className="text-muted">Loading…</p>}</Shell>;
+  if (!hello || (hello.signed_in && !s)) {
+    if (error) {
+      return (
+        <Shell>
+          <div className="card rise mt-[18vh] p-6 text-center">
+            <p className="text-danger">{error}</p>
+            <button type="button" className="btn-line mt-4" onClick={() => location.reload()}>
+              Try again
+            </button>
+          </div>
+        </Shell>
+      );
+    }
+    return <Skeletons />;
+  }
   if (hello.setup) return <Setup done={() => location.reload()} />;
-  if (!hello.signed_in) return <SignedOut />;
-  if (!s) return <Shell>{error ? <p className="text-danger">{error}</p> : <p className="text-muted">Loading…</p>}</Shell>;
+  if (!hello.signed_in || !s) return <SignedOut />;
 
   const tabs: [Tab, string][] = [
     ['pots', 'Pots'],
@@ -797,25 +1096,19 @@ export function App() {
   ];
   return (
     <Shell>
-      <header className="mb-5 flex items-center justify-between gap-3">
-        <div>
-          <p className="text-[12.5px] text-muted">Hi {s.me.name}</p>
-          <h1 className="text-[26px] font-bold leading-tight">{s.settings.group_name}</h1>
+      <header className="sticky top-0 z-20 -mx-4 mb-5 bg-bg/85 px-4 pb-3 pt-2 backdrop-blur-md">
+        <div className="flex min-w-0 items-center gap-3">
+          <Mark />
+          <div className="min-w-0">
+            <p className="text-[12px] text-muted">Hi {s.me.name}</p>
+            <h1 className="display truncate text-[22px] font-bold leading-tight">{s.settings.group_name}</h1>
+          </div>
         </div>
-        <nav className="flex rounded-full border border-line bg-raised p-1">
-          {tabs.map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setTab(id)}
-              className={`h-8 rounded-full px-3.5 text-[13px] font-semibold ${tab === id ? 'bg-gold text-[#1a1406]' : 'text-muted'}`}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
+        <div className="mt-3">
+          <Tabs tabs={tabs} tab={tab} setTab={setTab} />
+        </div>
       </header>
-      {error && <p className="mb-4 rounded-2xl bg-danger/10 p-3 text-[14px] text-danger">{error}</p>}
+      {error && <p className="fade mb-4 rounded-2xl bg-danger/10 p-3 text-[14px] text-danger ring-1 ring-danger/20">{error}</p>}
 
       {tab === 'pots' && (
         <div className="space-y-4">
@@ -823,20 +1116,27 @@ export function App() {
             (creating ? (
               <NewPot
                 s={s}
+                close={() => setCreating(false)}
                 done={async () => {
                   setCreating(false);
                   await refresh();
                 }}
               />
             ) : (
-              <button type="button" className="btn-line w-full" onClick={() => setCreating(true)}>
+              <button type="button" className="btn-line h-12 w-full border-dashed text-[14.5px]" onClick={() => setCreating(true)}>
                 <LuPlus /> New pot
               </button>
             ))}
           {s.pots.length === 0 ? (
-            <div className="card p-6 text-center text-muted">No pots yet.{s.me.is_admin ? ' Start one for this weekend.' : ''}</div>
+            <div className="card rise p-8 text-center">
+              <span className="mx-auto block w-fit">
+                <Mark size={52} />
+              </span>
+              <p className="display mt-4 text-[18px] font-bold">No pots yet</p>
+              <p className="mt-1 text-[14px] text-muted">{s.me.is_admin ? 'Start one for this weekend.' : 'The holder will start one soon.'}</p>
+            </div>
           ) : (
-            s.pots.map((p) => <PotCard key={p.id} pot={p} s={s} refresh={refresh} />)
+            s.pots.map((p, i) => <PotCard key={p.id} pot={p} s={s} refresh={refresh} index={i} />)
           )}
         </div>
       )}

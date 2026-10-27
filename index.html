@@ -3,12 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#0b0d12" />
+    <meta name="theme-color" content="#06080c" />
     <meta name="robots" content="noindex, nofollow" />
+    <meta name="description" content="A private pot between friends, decided by Utopia's game records." />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Weekend Pot" />
     <title>Weekend Pot</title>
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='16' fill='%2312151c'/><circle cx='32' cy='34' r='16' fill='%23f2c14e'/><circle cx='32' cy='34' r='9' fill='none' stroke='%2312151c' stroke-width='4'/></svg>" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <style>
+      /* Dark from the first byte: no white flash before the app's styles load. */
+      html, body { background: #06080c; margin: 0; }
+    </style>
   </head>
-  <body class="bg-bg">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
