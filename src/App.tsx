@@ -37,20 +37,34 @@ function useFormat(s: State['settings']) {
     const day = { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' } as const;
     const when = new Intl.DateTimeFormat('en-GB', day);
     const whenZ = new Intl.DateTimeFormat('en-GB', { ...day, timeZoneName: 'short' });
+    const date = new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
     const clock = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit' });
     return {
       money: (n: number) => money.format(n),
       when: (iso: string) => when.format(new Date(iso)),
       whenZ: (iso: string) => whenZ.format(new Date(iso)),
+      date: (iso: string) => date.format(new Date(iso)),
       clock: (iso: string) => clock.format(new Date(iso)),
+      /** This phone's zone, like GMT+1. */
+      zone: whenZ.formatToParts(new Date()).find((p) => p.type === 'timeZoneName')?.value ?? '',
     };
   }, [s.currency]);
 }
 
-/** Good morning, afternoon or evening where you are. No name: a phone may be passed around. */
-function greeting() {
-  const h = new Date().getHours();
-  return h >= 5 && h < 12 ? 'Good morning' : h >= 12 && h < 17 ? 'Good afternoon' : 'Good evening';
+/** "Good evening · 21:14" where you are, kept current. No name: a phone may be passed around. */
+function Now() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 10_000);
+    return () => clearInterval(id);
+  }, []);
+  const h = now.getHours();
+  const hello = h >= 5 && h < 12 ? 'Good morning' : h >= 12 && h < 17 ? 'Good afternoon' : 'Good evening';
+  return (
+    <>
+      {hello} · <span className="tabular-nums">{now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
+    </>
+  );
 }
 
 function ago(iso: string) {
@@ -593,10 +607,10 @@ function PotCard({ pot, s, refresh, index, focus, go }: { pot: Pot; s: State; re
       <Badge tone="warn">Decided · paying out</Badge>
     ) : pot.phase === 'settled' ? (
       <Badge tone="muted">
-        <LuCheck /> Paid out
+        <LuCheck /> Paid out · {f.date(pot.starts_at)}
       </Badge>
     ) : (
-      <Badge tone="danger">Cancelled</Badge>
+      <Badge tone="danger">Cancelled · {f.date(pot.starts_at)}</Badge>
     );
 
   const winners = (d?.winners ?? []).map(name).join(' & ');
@@ -672,6 +686,14 @@ function PotCard({ pot, s, refresh, index, focus, go }: { pot: Pot; s: State; re
         <div>
           {built && (
           <div className="border-t border-white/[0.06] px-5 pb-5 pt-4">
+            <p className="mb-4 flex items-start gap-2 text-[13px] leading-5 text-muted">
+              <LuClock className="mt-[3px] shrink-0 text-faint" />
+              <span>
+                Games count <span className="font-semibold text-ink">{f.when(pot.starts_at)}</span> to{' '}
+                <span className="font-semibold text-ink">{f.when(pot.ends_at)}</span>
+                <span className="text-faint"> · your time{f.zone ? ` (${f.zone})` : ''}</span>
+              </span>
+            </p>
             {result && d && (
               <div className="relative mb-4 overflow-visible rounded-2xl bg-gradient-to-br from-gold/[0.12] to-transparent p-4 ring-1 ring-gold/15">
                 {confetti && <Confetti />}
@@ -1623,7 +1645,9 @@ export function App() {
         <div className="flex min-w-0 items-center gap-3">
           <Mark />
           <div className="min-w-0">
-            <p className="text-[12px] text-muted">{greeting()}</p>
+            <p className="text-[12px] text-muted">
+              <Now />
+            </p>
             <h1 className="display truncate text-[22px] font-bold leading-tight">{s.settings.group_name}</h1>
           </div>
         </div>
